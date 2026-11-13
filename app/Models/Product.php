@@ -8,7 +8,7 @@ class Product extends Model
 {
     protected $fillable = [
         'name', 'brand', 'format_cl', 'bottles_per_crate', 'price_crate',
-        'price_bottle', 'cost_crate', 'alert_threshold', 'active',
+        'price_bottle', 'cost_crate', 'alert_threshold', 'active', 'container_type_id',
     ];
 
     // stock_bottles n'est volontairement PAS fillable : seul StockService le modifie.

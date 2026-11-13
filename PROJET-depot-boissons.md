@@ -31,9 +31,10 @@ Cible technique : API Laravel + front React (PWA, mobile-first, **hors ligne**),
 2. **La dette client ne se modifie jamais directement.** Tout passe par `CreditService` (journal `customer_ledger` + cache `customers.balance`).
 3. **Les prix viennent toujours du serveur**, jamais du client.
 4. **Idempotence par `uuid`** sur les ventes et les paiements (le client génère l'uuid ; un renvoi ne duplique rien).
-5. **Ordre des verrous** : caisse → client → produits (produits triés par id). Évite les deadlocks.
-6. **Les identifiants de base d'un tenant ne vont jamais dans le `.env`.** Ils sont portés par le tenant (voir §4).
-7. Une opération d'argent/stock = **une transaction** (vente + sorties de stock + écriture de dette ensemble, ou rien).
+5. **Ordre des verrous** : caisse → client → produits (triés par id) → types de casiers (triés par id) → soldes de casiers. Évite les deadlocks.
+6. **Les casiers ne se modifient jamais directement.** Tout passe par `ContainerService` (journal `container_movements` + caches `container_types.empty_stock` et `container_holdings.quantity`).
+7. **Les identifiants de base d'un tenant ne vont jamais dans le `.env`.** Ils sont portés par le tenant (voir §4).
+8. Une opération d'argent/stock/casiers = **une transaction** (vente + sorties de stock + dette + casiers ensemble, ou rien).
 
 ## 3. Rôles
 
@@ -96,7 +97,7 @@ Statuts : `pending_db` → `provisioning` → `active` (ou `failed`, `suspended`
 |---|---|
 | `users` | Comptes du dépôt (`role`, `active`) |
 | `personal_access_tokens` | Tokens Sanctum (par tenant) |
-| `products` | Nom, marque, format, `bottles_per_crate`, `price_crate`, `price_bottle`, `cost_crate`, `stock_bottles` (cache), `alert_threshold`, `active` |
+| `products` | Nom, marque, format, `bottles_per_crate`, `price_crate`, `price_bottle`, `cost_crate`, `stock_bottles` (cache), `alert_threshold`, `active`, `container_type_id` (null = non consigné) |
 | `stock_movements` | **Journal du stock** : `type` (entree/sortie/casse/ajustement/inventaire), `quantity` signée en bouteilles, référence polymorphe, `user_id` |
 | `cash_sessions` | Une caisse par vendeur : fond, `expected_cash`, `counted_cash`, `difference`, `opened_at/closed_at`, `closed_by` |
 | `expenses` | Dépenses rattachées à une session |
@@ -104,6 +105,9 @@ Statuts : `pending_db` → `provisioning` → `active` (ou `failed`, `suspended`
 | `customers` | Nom, téléphone, type (bar/restaurant/revendeur/particulier), `credit_limit`, `balance` (cache), `active` |
 | `customer_ledger` | **Journal des dettes** : `amount` signé (+ dette, − remboursement), `balance_after`, référence polymorphe |
 | `payments` | Remboursements de dette (`uuid` unique, `method` cash/momo, rattaché à une caisse, `sale_id` si acompte) |
+| `container_types` | Type de casier (casier + ses bouteilles) : `deposit_amount` (valeur de consigne), `empty_stock` (casiers vides au dépôt, cache) |
+| `container_holdings` | Casiers qu'un tiers doit rendre (`party_type` customer/supplier, `party_id`, `quantity`, cache) |
+| `container_movements` | **Journal des casiers** : `type` (sale_out, return_in, from_supplier, to_supplier, loss, adjustment), `party_delta`, `depot_delta`, référence polymorphe |
 
 Caisse théorique = **fond + ventes cash + remboursements de dette en cash − dépenses**. MoMo et ventes à crédit sont suivis à part et n'entrent pas dans le tiroir.
 
@@ -129,6 +133,23 @@ Auth : `POST login` → token ; ensuite `Authorization: Bearer <token>`.
 | POST | `customers/{id}/payments` | idem | Remboursement de dette (idempotent) |
 | GET | `receivables` | gérant, caissier | Créances : total, dernier paiement, dépassement de limite |
 | POST | `customers/{id}/adjustments` | gérant | Abandon / correction de créance |
+| GET | `containers` | connecté | Types de casiers : vides au dépôt, dus par les clients, valeur de consigne |
+| POST/PUT | `containers`, `containers/{id}` | gérant | Créer / modifier un type de casier |
+| GET | `containers/{id}/holders` | gérant, caissier | Quels clients doivent des casiers de ce type |
+| GET | `containers/{id}/movements` | gérant, magasinier | Journal des casiers |
+| POST | `containers/depot-movements` | gérant, magasinier | Vides du dépôt : `from_supplier`, `to_supplier`, `loss`, `adjustment` (inventaire initial inclus) |
+| GET | `customers/{id}/containers` | gérant, caissier, vendeur, magasinier | Casiers que ce client doit rendre |
+| POST | `customers/{id}/containers/returns` | idem | Le client rapporte des vides |
+| POST | `customers/{id}/containers/adjustments` | gérant | Correction / abandon de casiers dus |
+
+### Consignes (casiers)
+Un type de casier = un casier avec ses bouteilles. On lie un produit à un type via `products.container_type_id`.
+
+À la vente (`POST sales`), chaque casier plein vendu **d'un produit consigné, vendu en casier** est compté. Le champ optionnel `empties_returned: [{container_type_id, quantity}]` indique les vides rendus pendant la vente. Exemple : 10 casiers vendus, 8 vides rendus → le client doit désormais 2 casiers, et les 8 vides entrent dans le stock de vides du dépôt.
+
+- **Client identifié** : le solde de ce qu'il doit évolue (jamais négatif).
+- **Client anonyme** : l'échange doit être équilibré (autant rendus que vendus), sinon la vente est refusée (« sélectionnez un client »).
+- Le stock de vides du dépôt se renseigne par `containers/depot-movements` (par exemple `adjustment` pour l'inventaire initial).
 
 ### Vente à crédit
 `POST sales` avec `payment_method: "credit"`, `customer_id`, et optionnellement `paid_now` + `paid_method` (acompte). Refusée si la dette dépasse `credit_limit`, sauf `override_limit: true` par un gérant. Un paiement ne peut pas dépasser la dette.
@@ -150,20 +171,21 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - [x] Produits + stock en journal (`StockService`), réception, casse, ajustement
 - [x] Caisse par sessions, dépenses, clôture avec écart, ventes idempotentes (cash / MoMo)
 - [x] Clients, crédit, limites, remboursements, créances, ledger des dettes _(patch crédits)_
+- [x] Consignes : types de casiers, vides du dépôt, casiers dus par client, retours à la vente ou après, journal des casiers _(patch consignes)_
 
 ## 9. Reste à faire (ordre suggéré)
 
 **Cœur métier**
-1. **Consignes** : casiers et bouteilles vides par client et par fournisseur (`container_types`, `container_movements`) ; suivre « 10 casiers pleins, 8 vides rendus → 2 dus ».
-2. **Achats et fournisseurs** : commandes, réceptions liées au stock, factures, **dettes fournisseurs** (ledger symétrique aux clients).
-3. **Annulation de vente** : restitution du stock, correction de caisse et de dette, avec trace.
-4. **Inventaire physique** : comptage, écarts, mouvement `inventaire`.
+1. **Achats et fournisseurs** : commandes, réceptions liées au stock, factures, **dettes fournisseurs** (journal symétrique aux clients) et **casiers dus à la brasserie** (le `party_type = supplier` est déjà prévu dans `container_holdings`).
+2. **Annulation de vente** : restitution du stock, correction de caisse, de dette et de casiers, avec trace.
+3. **Compléments consignes** : facturation d'un casier non rendu (conversion en dette d'argent via `deposit_amount`), consigne payée par un client anonyme, bouteilles vendues à l'unité.
+4. **Inventaire physique** : comptage, écarts, mouvement `inventaire` (produits et casiers vides).
 5. **Personnel** : CRUD utilisateurs, désactivation, changement/réinitialisation de mot de passe.
 6. **Audit** : historique des modifications sensibles (prix, limites, ajustements) — `audit_logs`.
 7. **Dashboard et rapports** : CA du jour, dépenses, bénéfice estimé, alertes de stock, bilans jour/semaine/mois, PDF (factures, tickets, clôture de caisse).
 
 **Produit**
-8. **Front React PWA** (mobile-first) : vente rapide au comptoir, caisse, stock, clients.
+8. **Front React PWA** (mobile-first) : vente rapide au comptoir, caisse, stock, clients, casiers.
 9. **Hors ligne** : cache IndexedDB (catalogue, clients), file de synchronisation avec uuid, résolution de conflits.
 10. **SaaS** : super-admin, plans et abonnements, facturation des dépôts, suspension automatique, inscription/onboarding.
 11. **Paiement MoMo** intégré, notifications WhatsApp/SMS pour relancer les dettes.
@@ -180,6 +202,9 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - **Hors ligne non fini** : une vente synchronisée après la clôture de la caisse est refusée. Il faudra empêcher la clôture tant que des ventes locales ne sont pas envoyées, ou rattacher la vente à la session active à `sold_at`.
 - **Une caisse ouverte par utilisateur** : le même compte sur deux appareils partage la même caisse.
 - **Pas d'annulation de vente** ni de remboursement client pour l'instant.
+- **Consignes** : seuls les casiers vendus **en casier** (`unit: crate`) de produits consignés sont suivis ; les bouteilles vendues à l'unité et leurs vides ne le sont pas. Un casier est suivi avec ses bouteilles (pas de suivi séparé).
+- **Consignes** : aucune facturation automatique d'un casier non rendu (`deposit_amount` ne sert qu'à valoriser). Un client anonyme doit rendre autant de casiers qu'il en achète.
+- **Consignes** : pas de retour anticipé (solde de casiers jamais négatif) ; le stock de vides du dépôt doit être initialisé à la main, et les échanges avec la brasserie se saisissent comme mouvements du dépôt tant que les achats ne sont pas faits (aucune dette de casiers envers un fournisseur).
 - **Dette ≥ 0** : pas d'avance ni d'avoir client ; un paiement ne peut pas dépasser la dette.
 - **Vendeurs et caissiers voient tous les clients** et leurs dettes (pas de cloisonnement par vendeur).
 - **Pas de TVA ni de facturation normalisée.** Seule la logique de caisse est couverte.
@@ -220,3 +245,4 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - `depot-socle.patch` : Tenancy, provisioning, auth, produits de base, stock (`StockService`).
 - `depot-ventes-caisse.patch` : caisse, ventes, produits/stock (API), démo.
 - `depot-credits.patch` : clients, crédit, remboursements, créances.
+- `depot-consignes.patch` : types de casiers, vides du dépôt, casiers dus par client, intégration à la vente (modifie `SaleService`, `SaleController`, `Product`, `ProductController`, `routes/depot/operations.php`).

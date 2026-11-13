@@ -13,7 +13,7 @@ use Illuminate\Support\Facades\DB;
 
 class SaleService
 {
-    public function __construct(private StockService $stock, private CreditService $credit)
+    public function __construct(private StockService $stock, private CreditService $credit, private ContainerService $containers)
     {
     }
 
@@ -68,6 +68,7 @@ class SaleService
         $products = Product::whereIn('id', $lines->pluck('product_id')->unique())->get()->keyBy('id');
 
         $prepared = [];
+        $soldByType = [];   // casiers pleins vendus par type de casier
         $total = 0;
 
         foreach ($lines as $line) {
@@ -85,6 +86,10 @@ class SaleService
             }
 
             $quantity = (int) $line['quantity'];
+
+            if ($isCrate && $product->container_type_id) {
+                $soldByType[$product->container_type_id] = ($soldByType[$product->container_type_id] ?? 0) + $quantity;
+            }
             $lineTotal = (int) $price * $quantity;
             $total += $lineTotal;
 
@@ -134,6 +139,16 @@ class SaleService
         foreach ($prepared as $row) {
             $sale->items()->create($row);
             $this->stock->move($products[$row['product_id']], 'sortie', -$row['bottles'], $by, $sale, 'Vente #'.$sale->id);
+        }
+
+        $returnedByType = [];
+        foreach ($data['empties_returned'] ?? [] as $r) {
+            $id = (int) $r['container_type_id'];
+            $returnedByType[$id] = ($returnedByType[$id] ?? 0) + (int) $r['quantity'];
+        }
+
+        if ($soldByType || $returnedByType) {
+            $this->containers->applySale($by, $customer, $sale, $soldByType, $returnedByType);
         }
 
         if ($isCredit) {

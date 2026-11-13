@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\CashController;
+use App\Http\Controllers\ContainerController;
 use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\SaleController;
@@ -45,3 +46,25 @@ Route::middleware(EnsureRole::class.':gerant,caissier')->get('receivables', [Cus
 
 // Abandon / correction de créance : gérant uniquement
 Route::middleware(EnsureRole::class.':gerant')->post('customers/{customer}/adjustments', [CustomerController::class, 'adjust']);
+
+// Consignes (casiers)
+Route::get('containers', [ContainerController::class, 'index']);   // tout utilisateur connecté
+
+Route::middleware(EnsureRole::class.':gerant')->group(function () {
+    Route::post('containers', [ContainerController::class, 'store']);
+    Route::put('containers/{containerType}', [ContainerController::class, 'update']);
+    Route::post('customers/{customer}/containers/adjustments', [ContainerController::class, 'adjustHolding']);
+});
+
+Route::middleware(EnsureRole::class.':gerant,magasinier')->group(function () {
+    Route::post('containers/depot-movements', [ContainerController::class, 'depotMovement']);
+    Route::get('containers/{containerType}/movements', [ContainerController::class, 'movements']);
+});
+
+Route::middleware(EnsureRole::class.':gerant,caissier')->get('containers/{containerType}/holders', [ContainerController::class, 'holders']);
+
+// Retours de casiers vides : le magasinier les réceptionne aussi
+Route::middleware(EnsureRole::class.':gerant,caissier,vendeur,magasinier')->group(function () {
+    Route::get('customers/{customer}/containers', [ContainerController::class, 'customerHoldings']);
+    Route::post('customers/{customer}/containers/returns', [ContainerController::class, 'customerReturn']);
+});

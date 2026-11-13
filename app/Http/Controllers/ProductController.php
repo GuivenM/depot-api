@@ -40,6 +40,7 @@ class ProductController extends Controller
             'cost_crate'        => 'nullable|integer|min:0',
             'alert_threshold'   => 'sometimes|integer|min:0',
             'active'            => 'sometimes|boolean',
+            'container_type_id' => 'nullable|integer|exists:container_types,id',
         ]);
     }
 }
