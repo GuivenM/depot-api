@@ -1,0 +1,23 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Customer extends Model
+{
+    // `balance` n'est volontairement PAS fillable : seul CreditService le modifie.
+    protected $fillable = ['name', 'phone', 'type', 'credit_limit', 'active', 'note'];
+
+    protected $casts = ['active' => 'boolean'];
+
+    public function ledger()
+    {
+        return $this->hasMany(CustomerLedgerEntry::class);
+    }
+
+    public function payments()
+    {
+        return $this->hasMany(Payment::class);
+    }
+}

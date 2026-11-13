@@ -21,6 +21,9 @@ class SaleController extends Controller
         if ($user->role !== 'gerant') {
             $query->where('user_id', $user->id);
         }
+        if ($customerId = $request->query('customer_id')) {
+            $query->where('customer_id', $customerId);
+        }
         if ($sessionId = $request->query('session_id')) {
             $query->where('cash_session_id', $sessionId);
         }
@@ -32,7 +35,11 @@ class SaleController extends Controller
     {
         $data = $request->validate([
             'uuid'                 => 'required|uuid',
-            'payment_method'       => 'required|in:cash,momo',
+            'payment_method'       => 'required|in:cash,momo,credit',
+            'customer_id'          => 'required_if:payment_method,credit|nullable|integer|exists:customers,id',
+            'paid_now'             => 'nullable|integer|min:0',
+            'paid_method'          => 'nullable|in:cash,momo',
+            'override_limit'       => 'nullable|boolean',
             'sold_at'              => 'nullable|date|before_or_equal:now',
             'items'                => 'required|array|min:1|max:100',
             'items.*.product_id'   => 'required|integer|exists:products,id',

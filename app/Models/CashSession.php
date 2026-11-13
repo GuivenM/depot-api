@@ -31,21 +31,32 @@ class CashSession extends Model
         return $this->hasMany(Expense::class);
     }
 
-    /** Seul le cash physique compte dans la caisse théorique ; MoMo est suivi à part. */
+    public function payments()
+    {
+        return $this->hasMany(Payment::class);
+    }
+
+    /** Caisse théorique = fond + ventes cash + remboursements de dette en cash - dépenses. MoMo et crédit sont suivis à part. */
     public function summary(): array
     {
         $completed = $this->sales()->where('status', 'completed');
 
         $cash = (int) (clone $completed)->where('payment_method', 'cash')->sum('total');
         $momo = (int) (clone $completed)->where('payment_method', 'momo')->sum('total');
+        $credit = (int) (clone $completed)->where('payment_method', 'credit')->sum('total');
+        $payCash = (int) $this->payments()->where('method', 'cash')->sum('amount');
+        $payMomo = (int) $this->payments()->where('method', 'momo')->sum('amount');
         $expenses = (int) $this->expenses()->sum('amount');
 
         return [
             'opening_amount' => (int) $this->opening_amount,
             'cash_sales'     => $cash,
             'momo_sales'     => $momo,
+            'credit_sales'   => $credit,
+            'customer_payments_cash' => $payCash,
+            'customer_payments_momo' => $payMomo,
             'expenses'       => $expenses,
-            'expected_cash'  => (int) $this->opening_amount + $cash - $expenses,
+            'expected_cash'  => (int) $this->opening_amount + $cash + $payCash - $expenses,
         ];
     }
 }

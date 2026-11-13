@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\CashController;
+use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\SaleController;
 use App\Http\Controllers\StockController;
@@ -30,3 +31,17 @@ Route::middleware(EnsureRole::class.':gerant,caissier,vendeur')->group(function 
     Route::get('sales', [SaleController::class, 'index']);
     Route::post('sales', [SaleController::class, 'store']);
 });
+
+// Clients et crédit
+Route::middleware(EnsureRole::class.':gerant,caissier,vendeur')->group(function () {
+    Route::get('customers', [CustomerController::class, 'index']);
+    Route::post('customers', [CustomerController::class, 'store']);
+    Route::put('customers/{customer}', [CustomerController::class, 'update']);
+    Route::get('customers/{customer}/ledger', [CustomerController::class, 'ledger']);
+    Route::post('customers/{customer}/payments', [CustomerController::class, 'pay']);
+});
+
+Route::middleware(EnsureRole::class.':gerant,caissier')->get('receivables', [CustomerController::class, 'receivables']);
+
+// Abandon / correction de créance : gérant uniquement
+Route::middleware(EnsureRole::class.':gerant')->post('customers/{customer}/adjustments', [CustomerController::class, 'adjust']);

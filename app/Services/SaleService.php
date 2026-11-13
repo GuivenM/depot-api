@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Exceptions\DepotException;
 use App\Models\CashSession;
+use App\Models\Customer;
 use App\Models\Product;
 use App\Models\Sale;
 use App\Models\User;
@@ -12,7 +13,7 @@ use Illuminate\Support\Facades\DB;
 
 class SaleService
 {
-    public function __construct(private StockService $stock)
+    public function __construct(private StockService $stock, private CreditService $credit)
     {
     }
 
@@ -45,6 +46,21 @@ class SaleService
 
         if (! $session) {
             throw DepotException::noOpenCashSession();
+        }
+
+        $isCredit = $data['payment_method'] === 'credit';
+        $customer = null;
+
+        if (! empty($data['customer_id'])) {
+            $customer = Customer::lockForUpdate()->findOrFail($data['customer_id']);
+
+            if (! $customer->active) {
+                throw new DepotException('Ce client est désactivé.');
+            }
+        }
+
+        if ($isCredit && ! $customer) {
+            throw new DepotException('Un client est requis pour une vente à crédit.');
         }
 
         // Tri par produit : ordre de verrouillage constant, pas de deadlock entre ventes.
@@ -82,10 +98,33 @@ class SaleService
             ];
         }
 
+        $paidNow = 0;
+
+        if ($isCredit) {
+            $paidNow = (int) ($data['paid_now'] ?? 0);
+
+            if ($paidNow >= $total) {
+                throw new DepotException('Le paiement immédiat couvre tout le total : enregistrez une vente comptant.');
+            }
+            if ($paidNow > 0 && empty($data['paid_method'])) {
+                throw new DepotException('Précisez le mode du paiement immédiat (cash ou momo).');
+            }
+
+            $newDebt = $total - $paidNow;
+            $override = $by->role === 'gerant' && ! empty($data['override_limit']);
+
+            if (! $override && $customer->balance + $newDebt > $customer->credit_limit) {
+                throw new DepotException(
+                    "Limite de crédit dépassée (dette actuelle {$customer->balance} FCFA, limite {$customer->credit_limit} FCFA)."
+                );
+            }
+        }
+
         $sale = Sale::create([
             'uuid'            => $data['uuid'],
             'cash_session_id' => $session->id,
             'user_id'         => $by->id,
+            'customer_id'     => $customer?->id,
             'payment_method'  => $data['payment_method'],
             'total'           => $total,
             'status'          => 'completed',
@@ -95,6 +134,14 @@ class SaleService
         foreach ($prepared as $row) {
             $sale->items()->create($row);
             $this->stock->move($products[$row['product_id']], 'sortie', -$row['bottles'], $by, $sale, 'Vente #'.$sale->id);
+        }
+
+        if ($isCredit) {
+            $this->credit->charge($customer, $total, $by, $sale, 'Vente #'.$sale->id);
+
+            if ($paidNow > 0) {
+                $this->credit->applyPayment($customer, $by, $paidNow, $data['paid_method'], $session, $sale, note: 'Acompte vente #'.$sale->id);
+            }
         }
 
         return $sale;
