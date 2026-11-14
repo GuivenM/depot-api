@@ -27,3 +27,4 @@ Homestead.yaml
 Thumbs.db
 *.patch
 *.local
+database/testing_*.sqlite
