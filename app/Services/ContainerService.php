@@ -7,7 +7,9 @@ use App\Models\ContainerHolding;
 use App\Models\ContainerMovement;
 use App\Models\ContainerType;
 use App\Models\Customer;
+use App\Models\Purchase;
 use App\Models\Sale;
+use App\Models\Supplier;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -71,6 +73,44 @@ class ContainerService
 
             if ($back > 0) {
                 $type->increment('empty_stock', $back);
+            }
+        }
+    }
+
+    /**
+     * Appelé par PurchaseService, dans la transaction de l'achat.
+     * Casiers pleins reçus = casiers dus au fournisseur ; vides rendus = on en doit moins (solde négatif autorisé :
+     * le fournisseur nous en doit). Les vides rendus sortent du stock de vides du dépôt.
+     *
+     * @param array<int,int> $received [container_type_id => casiers pleins reçus]
+     * @param array<int,int> $returned [container_type_id => casiers vides rendus au fournisseur]
+     */
+    public function applyPurchase(User $by, Supplier $supplier, Purchase $purchase, array $received, array $returned): void
+    {
+        $typeIds = array_values(array_unique(array_merge(array_keys($received), array_keys($returned))));
+        sort($typeIds);
+
+        foreach ($typeIds as $typeId) {
+            $in = (int) ($received[$typeId] ?? 0);
+            $out = (int) ($returned[$typeId] ?? 0);
+            $type = ContainerType::lockForUpdate()->findOrFail($typeId);
+
+            if ($out > $type->empty_stock) {
+                throw new DepotException("Stock de casiers vides insuffisant pour en rendre {$out} ({$type->empty_stock} « {$type->name} » au dépôt).");
+            }
+
+            $holding = $this->holding($type, 'supplier', $supplier->id);
+            $before = (int) $holding->quantity;
+            $after = $before + $in - $out;
+
+            $holding->update(['quantity' => $after]);
+
+            if ($in > 0) {
+                $this->log($by, $type, 'purchase_in', 'supplier', $supplier->id, $in, 0, $before + $in, $purchase);
+            }
+            if ($out > 0) {
+                $this->log($by, $type, 'to_supplier', 'supplier', $supplier->id, -$out, -$out, $after, $purchase);
+                $type->decrement('empty_stock', $out);
             }
         }
     }

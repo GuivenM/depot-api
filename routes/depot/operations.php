@@ -4,8 +4,10 @@ use App\Http\Controllers\CashController;
 use App\Http\Controllers\ContainerController;
 use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\ProductController;
+use App\Http\Controllers\PurchaseController;
 use App\Http\Controllers\SaleController;
 use App\Http\Controllers\StockController;
+use App\Http\Controllers\SupplierController;
 use App\Http\Middleware\EnsureRole;
 use Illuminate\Support\Facades\Route;
 
@@ -67,4 +69,22 @@ Route::middleware(EnsureRole::class.':gerant,caissier')->get('containers/{contai
 Route::middleware(EnsureRole::class.':gerant,caissier,vendeur,magasinier')->group(function () {
     Route::get('customers/{customer}/containers', [ContainerController::class, 'customerHoldings']);
     Route::post('customers/{customer}/containers/returns', [ContainerController::class, 'customerReturn']);
+});
+
+// Fournisseurs et achats
+Route::middleware(EnsureRole::class.':gerant,magasinier')->group(function () {
+    Route::get('suppliers', [SupplierController::class, 'index']);
+    Route::post('suppliers', [SupplierController::class, 'store']);
+    Route::put('suppliers/{supplier}', [SupplierController::class, 'update']);
+    Route::get('suppliers/{supplier}/containers', [SupplierController::class, 'containers']);
+    Route::get('purchases', [PurchaseController::class, 'index']);
+    Route::post('purchases', [PurchaseController::class, 'store']);
+});
+
+// Dettes fournisseurs : l'argent qui sort est réservé au gérant
+Route::middleware(EnsureRole::class.':gerant')->group(function () {
+    Route::get('payables', [SupplierController::class, 'payables']);
+    Route::get('suppliers/{supplier}/ledger', [SupplierController::class, 'ledger']);
+    Route::post('suppliers/{supplier}/payments', [SupplierController::class, 'pay']);
+    Route::post('suppliers/{supplier}/adjustments', [SupplierController::class, 'adjust']);
 });

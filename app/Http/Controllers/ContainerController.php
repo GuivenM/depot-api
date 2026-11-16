@@ -22,6 +22,11 @@ class ContainerController extends Controller
             ->groupBy('container_type_id')
             ->pluck('qty', 'container_type_id');
 
+        $owedSuppliers = ContainerHolding::where('party_type', 'supplier')
+            ->selectRaw('container_type_id, sum(quantity) as qty')
+            ->groupBy('container_type_id')
+            ->pluck('qty', 'container_type_id');
+
         return ContainerType::orderBy('name')->get()->map(fn ($t) => [
             'id'                => $t->id,
             'name'              => $t->name,
@@ -30,6 +35,7 @@ class ContainerController extends Controller
             'empty_stock'       => $t->empty_stock,
             'owed_by_customers' => (int) ($owed[$t->id] ?? 0),
             'owed_value'        => (int) ($owed[$t->id] ?? 0) * $t->deposit_amount,
+            'owed_to_suppliers' => (int) ($owedSuppliers[$t->id] ?? 0),
         ])->values();
     }
 
