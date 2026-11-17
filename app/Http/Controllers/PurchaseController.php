@@ -47,4 +47,11 @@ class PurchaseController extends Controller
 
         return response()->json($purchase, $created ? 201 : 200);
     }
+
+    public function void(Request $request, Purchase $purchase)
+    {
+        $data = $request->validate(['reason' => 'required|string|max:255']);
+
+        return $this->purchases->void($request->user(), $purchase->id, $data['reason']);
+    }
 }

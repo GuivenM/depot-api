@@ -49,10 +49,10 @@ class CashSession extends Model
         $cash = (int) (clone $completed)->where('payment_method', 'cash')->sum('total');
         $momo = (int) (clone $completed)->where('payment_method', 'momo')->sum('total');
         $credit = (int) (clone $completed)->where('payment_method', 'credit')->sum('total');
-        $payCash = (int) $this->payments()->where('method', 'cash')->sum('amount');
-        $payMomo = (int) $this->payments()->where('method', 'momo')->sum('amount');
+        $payCash = (int) $this->payments()->whereNull('voided_at')->where('method', 'cash')->sum('amount');
+        $payMomo = (int) $this->payments()->whereNull('voided_at')->where('method', 'momo')->sum('amount');
         $expenses = (int) $this->expenses()->sum('amount');
-        $supplierCash = (int) $this->supplierPayments()->where('method', 'cash')->sum('amount');
+        $supplierCash = (int) $this->supplierPayments()->whereNull('voided_at')->where('method', 'cash')->sum('amount');
 
         return [
             'opening_amount' => (int) $this->opening_amount,

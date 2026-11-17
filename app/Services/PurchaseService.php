@@ -6,7 +6,9 @@ use App\Exceptions\DepotException;
 use App\Models\CashSession;
 use App\Models\Product;
 use App\Models\Purchase;
+use App\Models\StockMovement;
 use App\Models\Supplier;
+use App\Models\SupplierPayment;
 use App\Models\User;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
@@ -38,6 +40,57 @@ class PurchaseService
         }
 
         return [$purchase->load('items'), true];
+    }
+
+    /**
+     * Annule une réception (gérant) : retire la marchandise du stock (refusé si elle est déjà vendue),
+     * annule la dette et les règlements, rend les casiers. Les règlements cash doivent appartenir à des caisses ouvertes.
+     */
+    public function void(User $by, int $purchaseId, string $reason): Purchase
+    {
+        return DB::transaction(function () use ($by, $purchaseId, $reason) {
+            $purchase = Purchase::lockForUpdate()->findOrFail($purchaseId);
+
+            if ($purchase->status === 'voided') {
+                throw new DepotException('Cet achat est déjà annulé.', 409);
+            }
+
+            // Ordre des verrous : caisse -> fournisseur -> produits -> casiers.
+            $sessionIds = SupplierPayment::where('purchase_id', $purchase->id)
+                ->whereNull('voided_at')->where('method', 'cash')
+                ->pluck('cash_session_id')->unique()->sort();
+
+            foreach ($sessionIds as $sessionId) {
+                if (CashSession::lockForUpdate()->findOrFail($sessionId)->closed_at) {
+                    throw new DepotException('Un règlement en cash de cet achat appartient à une caisse clôturée : annulation impossible.', 409);
+                }
+            }
+
+            $supplier = Supplier::lockForUpdate()->findOrFail($purchase->supplier_id);
+
+            $movements = StockMovement::where('reference_type', $purchase->getMorphClass())
+                ->where('reference_id', $purchase->id)
+                ->where('type', 'entree')
+                ->orderBy('product_id')
+                ->get();
+
+            foreach ($movements as $m) {
+                // Lève InsufficientStock si la marchandise a déjà été vendue.
+                $this->stock->move(Product::findOrFail($m->product_id), 'annulation', -$m->quantity, $by, $purchase, 'Annulation achat #'.$purchase->id);
+            }
+
+            $this->suppliers->voidPurchase($supplier, $purchase, $by, $reason);
+            $this->containers->reverse($by, $purchase, $reason);
+
+            $purchase->update([
+                'status'      => 'voided',
+                'voided_at'   => now(),
+                'voided_by'   => $by->id,
+                'void_reason' => $reason,
+            ]);
+
+            return $purchase->load('items');
+        });
     }
 
     private function record(User $by, array $data): Purchase

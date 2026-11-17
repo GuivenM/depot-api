@@ -177,6 +177,58 @@ class ContainerService
         });
     }
 
+    /**
+     * Annule les effets sur les casiers d'une opération (vente ou achat) en rejouant l'inverse de ses mouvements.
+     * Refusé si un client aurait un solde négatif, ou si les vides du dépôt deviendraient négatifs
+     * (casiers déjà rendus ou renvoyés depuis).
+     */
+    public function reverse(User $by, Model $ref, string $reason): void
+    {
+        $rows = ContainerMovement::where('reference_type', $ref->getMorphClass())
+            ->where('reference_id', $ref->getKey())
+            ->where('type', '!=', 'void')
+            ->get();
+
+        foreach ($rows->pluck('container_type_id')->unique()->sort() as $typeId) {
+            $type = ContainerType::lockForUpdate()->findOrFail($typeId);
+
+            $groups = $rows->where('container_type_id', $typeId)
+                ->groupBy(fn ($r) => ($r->party_type ?? '-').':'.($r->party_id ?? 0));
+
+            foreach ($groups as $group) {
+                $first = $group->first();
+                $partyDelta = -(int) $group->sum('party_delta');
+                $depotDelta = -(int) $group->sum('depot_delta');
+                $after = null;
+
+                if ($first->party_type) {
+                    $holding = $this->holding($type, $first->party_type, $first->party_id);
+                    $after = (int) $holding->quantity + $partyDelta;
+
+                    if ($first->party_type === 'customer' && $after < 0) {
+                        throw new DepotException(
+                            "Annulation impossible : le client a déjà rendu des casiers « {$type->name} » depuis cette opération. Corrigez ses casiers (ajustement) puis recommencez."
+                        );
+                    }
+
+                    $holding->update(['quantity' => $after]);
+                }
+
+                if ($depotDelta !== 0) {
+                    if ($type->empty_stock + $depotDelta < 0) {
+                        throw new DepotException(
+                            "Annulation impossible : stock de casiers vides « {$type->name} » insuffisant au dépôt ({$type->empty_stock})."
+                        );
+                    }
+
+                    $type->increment('empty_stock', $depotDelta);
+                }
+
+                $this->log($by, $type, 'void', $first->party_type, $first->party_id, $partyDelta, $depotDelta, $after, $ref, $reason);
+            }
+        }
+    }
+
     private function holding(ContainerType $type, string $partyType, int $partyId): ContainerHolding
     {
         $where = ['container_type_id' => $type->id, 'party_type' => $partyType, 'party_id' => $partyId];

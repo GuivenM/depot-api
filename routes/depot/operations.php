@@ -88,3 +88,7 @@ Route::middleware(EnsureRole::class.':gerant')->group(function () {
     Route::post('suppliers/{supplier}/payments', [SupplierController::class, 'pay']);
     Route::post('suppliers/{supplier}/adjustments', [SupplierController::class, 'adjust']);
 });
+
+// Annulations
+Route::middleware(EnsureRole::class.':gerant,caissier,vendeur')->post('sales/{sale}/void', [SaleController::class, 'void']);
+Route::middleware(EnsureRole::class.':gerant')->post('purchases/{purchase}/void', [PurchaseController::class, 'void']);

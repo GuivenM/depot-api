@@ -7,6 +7,7 @@ use App\Models\CashSession;
 use App\Models\Customer;
 use App\Models\Product;
 use App\Models\Sale;
+use App\Models\StockMovement;
 use App\Models\User;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
@@ -37,6 +38,60 @@ class SaleService
         }
 
         return [$sale->load('items'), true];
+    }
+
+    /**
+     * Annule une vente : restitue le stock, la dette (et l'acompte), les casiers ; la vente sort de la caisse.
+     * Réservé aux ventes dont la caisse est encore ouverte. Gérant : toute vente ; autres rôles : les leurs.
+     */
+    public function void(User $by, int $saleId, string $reason): Sale
+    {
+        return DB::transaction(function () use ($by, $saleId, $reason) {
+            $sale = Sale::findOrFail($saleId);
+
+            // Ordre des verrous (comme à la vente) : caisse -> client -> produits -> casiers.
+            $session = CashSession::lockForUpdate()->findOrFail($sale->cash_session_id);
+            $sale = Sale::lockForUpdate()->findOrFail($saleId);
+
+            if ($sale->status === 'voided') {
+                throw new DepotException('Cette vente est déjà annulée.', 409);
+            }
+            if ($by->role !== 'gerant' && $sale->user_id !== $by->id) {
+                throw new DepotException('Vous ne pouvez annuler que vos propres ventes.', 403);
+            }
+            if ($session->closed_at) {
+                throw new DepotException('La caisse de cette vente est clôturée : annulation impossible.', 409);
+            }
+
+            $customer = $sale->payment_method === 'credit'
+                ? Customer::lockForUpdate()->findOrFail($sale->customer_id)
+                : null;
+
+            $movements = StockMovement::where('reference_type', $sale->getMorphClass())
+                ->where('reference_id', $sale->id)
+                ->where('type', 'sortie')
+                ->orderBy('product_id')
+                ->get();
+
+            foreach ($movements as $m) {
+                $this->stock->move(Product::findOrFail($m->product_id), 'annulation', -$m->quantity, $by, $sale, 'Annulation vente #'.$sale->id);
+            }
+
+            if ($customer) {
+                $this->credit->voidSale($customer, $sale, $by, $reason);
+            }
+
+            $this->containers->reverse($by, $sale, $reason);
+
+            $sale->update([
+                'status'      => 'voided',
+                'voided_at'   => now(),
+                'voided_by'   => $by->id,
+                'void_reason' => $reason,
+            ]);
+
+            return $sale->load('items');
+        });
     }
 
     private function record(User $by, array $data): Sale

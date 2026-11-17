@@ -93,6 +93,33 @@ class SupplierService
     }
 
     /**
+     * Annule la dette d'un achat et ses règlements (marqués annulés : un règlement cash revient en caisse).
+     * Refusé si la dette deviendrait négative (on a déjà payé davantage que le reste dû).
+     */
+    public function voidPurchase(Supplier $supplier, Purchase $purchase, User $by, string $reason): void
+    {
+        $charges = SupplierLedgerEntry::where('reference_type', $purchase->getMorphClass())
+            ->where('reference_id', $purchase->id)
+            ->where('type', 'purchase')
+            ->get();
+
+        foreach ($charges as $charge) {
+            $this->post($supplier, 'void', -$charge->amount, $by, $purchase, $reason);
+        }
+
+        foreach (SupplierPayment::where('purchase_id', $purchase->id)->whereNull('voided_at')->get() as $payment) {
+            $payment->update(['voided_at' => now()]);
+            $this->post($supplier, 'void', $payment->amount, $by, $payment, $reason);
+        }
+
+        if ($supplier->balance < 0) {
+            throw new DepotException(
+                "Annulation impossible : vous avez déjà payé ce fournisseur au-delà du reste de cet achat. Corrigez d'abord sa dette (ajustement)."
+            );
+        }
+    }
+
+    /**
      * Correction de la dette (gérant). $amount signé.
      *
      * @return array{0: Supplier, 1: SupplierLedgerEntry}

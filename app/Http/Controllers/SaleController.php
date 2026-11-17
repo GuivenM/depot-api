@@ -54,4 +54,11 @@ class SaleController extends Controller
 
         return response()->json($sale, $created ? 201 : 200);
     }
+
+    public function void(Request $request, Sale $sale)
+    {
+        $data = $request->validate(['reason' => 'required|string|max:255']);
+
+        return $this->sales->void($request->user(), $sale->id, $data['reason']);
+    }
 }

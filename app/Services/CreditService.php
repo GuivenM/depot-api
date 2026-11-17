@@ -95,6 +95,33 @@ class CreditService
     }
 
     /**
+     * Annule la dette d'une vente à crédit et son acompte éventuel (l'acompte est marqué annulé : il sort de la caisse).
+     * Refusé si la dette du client deviendrait négative (il a déjà remboursé davantage que le reste dû).
+     */
+    public function voidSale(Customer $customer, Sale $sale, User $by, string $reason): void
+    {
+        $charges = CustomerLedgerEntry::where('reference_type', $sale->getMorphClass())
+            ->where('reference_id', $sale->id)
+            ->where('type', 'sale_credit')
+            ->get();
+
+        foreach ($charges as $charge) {
+            $this->post($customer, 'void', -$charge->amount, $by, $sale, $reason);
+        }
+
+        foreach (Payment::where('sale_id', $sale->id)->whereNull('voided_at')->get() as $payment) {
+            $payment->update(['voided_at' => now()]);
+            $this->post($customer, 'void', $payment->amount, $by, $payment, $reason);
+        }
+
+        if ($customer->balance < 0) {
+            throw new DepotException(
+                "Annulation impossible : le client a déjà remboursé plus que le reste de cette vente. Corrigez d'abord sa dette (ajustement)."
+            );
+        }
+    }
+
+    /**
      * Correction ou abandon de créance (gérant). $amount signé : < 0 réduit la dette, > 0 l'augmente.
      *
      * @return array{0: Customer, 1: CustomerLedgerEntry}
