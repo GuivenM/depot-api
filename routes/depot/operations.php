@@ -5,6 +5,7 @@ use App\Http\Controllers\ContainerController;
 use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\PurchaseController;
+use App\Http\Controllers\ReportController;
 use App\Http\Controllers\SaleController;
 use App\Http\Controllers\StockController;
 use App\Http\Controllers\SupplierController;
@@ -92,3 +93,13 @@ Route::middleware(EnsureRole::class.':gerant')->group(function () {
 // Annulations
 Route::middleware(EnsureRole::class.':gerant,caissier,vendeur')->post('sales/{sale}/void', [SaleController::class, 'void']);
 Route::middleware(EnsureRole::class.':gerant')->post('purchases/{purchase}/void', [PurchaseController::class, 'void']);
+
+// Rapports et tableau de bord (lecture seule)
+Route::middleware(EnsureRole::class.':gerant')->prefix('reports')->group(function () {
+    Route::get('overview', [ReportController::class, 'overview']);
+    Route::get('daily', [ReportController::class, 'daily']);
+    Route::get('top-products', [ReportController::class, 'topProducts']);
+    Route::get('cash-sessions', [ReportController::class, 'cashSessions']);
+});
+
+Route::middleware(EnsureRole::class.':gerant,magasinier')->get('reports/stock-alerts', [ReportController::class, 'stockAlerts']);
