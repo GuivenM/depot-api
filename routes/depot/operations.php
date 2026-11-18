@@ -3,6 +3,7 @@
 use App\Http\Controllers\CashController;
 use App\Http\Controllers\ContainerController;
 use App\Http\Controllers\CustomerController;
+use App\Http\Controllers\InventoryController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\PurchaseController;
 use App\Http\Controllers\ReportController;
@@ -103,3 +104,14 @@ Route::middleware(EnsureRole::class.':gerant')->prefix('reports')->group(functio
 });
 
 Route::middleware(EnsureRole::class.':gerant,magasinier')->get('reports/stock-alerts', [ReportController::class, 'stockAlerts']);
+
+// Inventaire physique : le magasinier compte, le gérant valide
+Route::middleware(EnsureRole::class.':gerant,magasinier')->group(function () {
+    Route::get('inventories', [InventoryController::class, 'index']);
+    Route::post('inventories', [InventoryController::class, 'store']);
+    Route::get('inventories/{inventory}', [InventoryController::class, 'show']);
+    Route::post('inventories/{inventory}/counts', [InventoryController::class, 'count']);
+    Route::post('inventories/{inventory}/cancel', [InventoryController::class, 'cancel']);
+});
+
+Route::middleware(EnsureRole::class.':gerant')->post('inventories/{inventory}/validate', [InventoryController::class, 'validateInventory']);

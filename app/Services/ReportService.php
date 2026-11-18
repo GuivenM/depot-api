@@ -8,6 +8,7 @@ use App\Models\ContainerHolding;
 use App\Models\ContainerType;
 use App\Models\Customer;
 use App\Models\Expense;
+use App\Models\Inventory;
 use App\Models\Payment;
 use App\Models\Product;
 use App\Models\Purchase;
@@ -141,6 +142,8 @@ class ReportService
             coalesce(sum(case when cost_crate is not null then stock_bottles * cost_crate * 1.0 / bottles_per_crate else 0 end), 0) as v
         ')->value('v');
 
+        $lastInventory = Inventory::where('status', 'validated')->latest('validated_at')->first();
+
         return [
             'receivables' => [
                 'total'      => (int) Customer::where('balance', '>', 0)->sum('balance'),
@@ -157,6 +160,13 @@ class ReportService
                 'value_at_cost'   => (int) round((float) $stockValue),
                 'below_threshold' => Product::where('active', true)->whereColumn('stock_bottles', '<=', 'alert_threshold')->count(),
             ],
+            'last_inventory' => $lastInventory ? [
+                'id'             => $lastInventory->id,
+                'validated_at'   => $lastInventory->validated_at,
+                'lines_with_gap' => $lastInventory->lines_with_gap,
+                'shortage_value' => $lastInventory->shortage_value,
+                'surplus_value'  => $lastInventory->surplus_value,
+            ] : null,
         ];
     }
 

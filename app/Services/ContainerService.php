@@ -178,6 +178,24 @@ class ContainerService
     }
 
     /**
+     * Applique l'écart d'un inventaire physique sur les casiers vides du dépôt (appelé par InventoryService).
+     * Refusé si les vides deviendraient négatifs.
+     */
+    public function applyInventory(User $by, int $typeId, int $delta, Model $inventory): void
+    {
+        $type = ContainerType::lockForUpdate()->findOrFail($typeId);
+
+        if ($type->empty_stock + $delta < 0) {
+            throw new DepotException(
+                "Inventaire impossible à valider : le stock de casiers vides « {$type->name} » deviendrait négatif ({$type->empty_stock} au dépôt, écart {$delta})."
+            );
+        }
+
+        $type->increment('empty_stock', $delta);
+        $this->log($by, $type, 'inventory', null, null, 0, $delta, null, $inventory, 'Inventaire #'.$inventory->getKey());
+    }
+
+    /**
      * Annule les effets sur les casiers d'une opération (vente ou achat) en rejouant l'inverse de ses mouvements.
      * Refusé si un client aurait un solde négatif, ou si les vides du dépôt deviendraient négatifs
      * (casiers déjà rendus ou renvoyés depuis).
