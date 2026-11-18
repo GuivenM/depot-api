@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Http\Middleware\EnsureTenantActive;
+use App\Http\Middleware\EnsureUserActive;
 use App\Tenancy\AutoProvisioner;
 use App\Tenancy\ManualProvisioner;
 use App\Tenancy\TenantDatabaseProvisioner;
@@ -23,6 +24,7 @@ class DepotServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->app['router']->aliasMiddleware('tenant.active', EnsureTenantActive::class);
+        $this->app['router']->aliasMiddleware('user.active', EnsureUserActive::class);
 
         Route::prefix('api/v1')
             ->middleware(['api', InitializeTenancyByRequestData::class, 'tenant.active'])

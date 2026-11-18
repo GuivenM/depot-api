@@ -1,6 +1,6 @@
 # Système de gestion de dépôt de boissons (SaaS) — Document de suivi
 
-_Mis à jour le 15 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
+_Mis à jour le 18 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
 
 ## 1. Vision
 
@@ -45,7 +45,7 @@ Cible technique : API Laravel + front React (PWA, mobile-first, **hors ligne**),
 | `caissier`, `vendeur` | Ouvrir sa caisse, vendre, encaisser des remboursements, gérer des clients (sans toucher aux limites) |
 | `magasinier` | Produits, réceptions, casse, ajustements de stock, fournisseurs et achats (**sans pouvoir payer**) |
 
-Les rôles sont une simple colonne `users.role`, vérifiée par le middleware `EnsureRole` (`EnsureRole::class.':gerant,caissier'`).
+Les rôles sont une simple colonne `users.role`, vérifiée par le middleware `EnsureRole` (`EnsureRole::class.':gerant,caissier'`). Un compte désactivé (`users.active = false`) est refusé à la connexion **et** sur toute requête (middleware `EnsureUserActive`, alias `user.active`), même avec un token encore valide.
 
 ## 4. Multi-tenant : comment ça marche ici
 
@@ -96,7 +96,7 @@ Statuts : `pending_db` → `provisioning` → `active` (ou `failed`, `suspended`
 
 | Table | Rôle |
 |---|---|
-| `users` | Comptes du dépôt (`role`, `active`) |
+| `users` | Comptes du dépôt (`role`, `active`, `must_change_password` : vrai après création ou réinitialisation par le gérant) |
 | `personal_access_tokens` | Tokens Sanctum (par tenant) |
 | `products` | Nom, marque, format, `bottles_per_crate`, `price_crate`, `price_bottle`, `cost_crate`, `stock_bottles` (cache), `alert_threshold`, `active`, `container_type_id` (null = non consigné) |
 | `stock_movements` | **Journal du stock** : `type` (entree/sortie/casse/ajustement/inventaire), `quantity` signée en bouteilles, référence polymorphe, `user_id` |
@@ -126,6 +126,12 @@ Auth : `POST login` → token ; ensuite `Authorization: Bearer <token>`.
 |---|---|---|---|
 | POST | `login` | — | Connexion (email, password) |
 | GET | `me` / POST `logout` | connecté | Profil / déconnexion |
+| POST | `me/password` | connecté | Changer son mot de passe (`current_password`, `password`, `password_confirmation`) ; déconnecte les autres appareils |
+| GET | `users` | gérant | Personnel (filtres `role`, `active`, `q`) |
+| POST | `users` | gérant | Créer un compte (`name`, `email`, `role`, `password` optionnel ; sinon mot de passe provisoire généré, renvoyé **une seule fois**) |
+| GET/PUT | `users/{id}` | gérant | Consulter / modifier nom, email, rôle |
+| POST | `users/{id}/deactivate` / `activate` | gérant | Désactiver (coupe tous ses tokens) / réactiver |
+| POST | `users/{id}/reset-password` | gérant | Nouveau mot de passe provisoire (renvoyé une seule fois), tokens révoqués |
 | GET | `products` | connecté | Liste avec `stock_crates` et `stock_loose_bottles` |
 | POST/PUT | `products`, `products/{id}` | gérant, magasinier | Créer / modifier |
 | GET | `products/{id}/movements` | gérant, magasinier | Historique du stock |
@@ -166,6 +172,14 @@ Auth : `POST login` → token ; ensuite `Authorization: Bearer <token>`.
 | POST | `inventories/{id}/counts` | gérant, magasinier | Enregistrer des comptages (`crates` et/ou `bottles`, ou `quantity` pour les casiers) ; recompter remplace |
 | POST | `inventories/{id}/cancel` | gérant, magasinier | Annuler un inventaire ouvert (aucun effet sur le stock) |
 | POST | `inventories/{id}/validate` | gérant | Appliquer les écarts au stock et aux casiers vides (tout ou rien) |
+
+### Personnel
+Le gérant gère les comptes ; **aucun compte n'est jamais supprimé** (il est référencé par les ventes, caisses et journaux) : on le désactive. Toute la logique passe par `UserService`.
+
+- **Mot de passe provisoire** : créé ou réinitialisé par le gérant, affiché une seule fois ; le compte porte `must_change_password = true` (renvoyé par `login` et `me`) jusqu'à ce que l'utilisateur change son mot de passe via `me/password`.
+- **Désactivation** : révoque tous les tokens du compte (déconnexion de tous ses appareils). Refusée (409) si le compte a une **caisse ouverte** : la clôturer d'abord. Même règle pour un changement de rôle.
+- **Garde-fous** : on ne peut ni désactiver son propre compte, ni changer son propre rôle, ni réinitialiser son propre mot de passe (il utilise `me/password`). Il doit toujours rester au moins un gérant actif (409).
+- Les emails sont enregistrés en minuscules, uniques **dans le dépôt** (le même email peut exister dans deux dépôts).
 
 ### Consignes (casiers)
 Un type de casier = un casier avec ses bouteilles. On lie un produit à un type via `products.container_type_id`.
@@ -211,7 +225,7 @@ Endpoints **en lecture seule** : l'API calcule les totaux (une seule règle de c
 
 ```bash
 php artisan migrate                              # base centrale
-php artisan tenants:migrate [--tenants=<id>]     # bases des dépôts
+php artisan tenants:migrate [--tenants=<id>]     # bases des dépôts (à relancer après chaque nouvelle migration tenant, ex. personnel)
 php artisan depot:provision <tenant> --email=... # prépare + migre + crée le gérant
 php artisan depot:demo <tenant>                  # 3 produits de démo avec stock
 ```
@@ -229,13 +243,14 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - [x] Rapports et tableau de bord côté API : vue d'ensemble, courbe journalière, top produits, alertes de stock, écarts de caisse _(patch rapports)_
 - [x] Annulation de vente et d'achat (contre-écritures sur stock, dettes, casiers et caisse) _(patch annulations)_
 - [x] Achats et fournisseurs : réceptions liées au stock, dettes fournisseurs (journal), règlements, casiers dus à la brasserie, dernier coût _(patch achats)_
+- [x] Personnel : création, modification, désactivation/réactivation, réinitialisation et changement de mot de passe, garde-fous (dernier gérant, caisse ouverte), refus des comptes désactivés même avec token _(patch personnel)_
 - [x] Suite de tests d'API (47 tests : isolation entre tenants, stock, ventes/caisse, crédit, consignes) _(patch tests : 47/47 verts à la première exécution, voir §15)_
 
 ## 9. Reste à faire (ordre suggéré)
 
 **Cœur métier**
-1. **Personnel** : CRUD utilisateurs, désactivation, changement/réinitialisation de mot de passe.
-2. **Audit** : historique des modifications sensibles (prix, limites, ajustements) — `audit_logs`.
+1. ~~**Personnel**~~ : fait (voir §8).
+2. **Audit** (y compris la création, le changement de rôle, la désactivation et la réinitialisation de mot de passe d'un compte) : historique des modifications sensibles (prix, limites, ajustements) — `audit_logs`.
 3. **Commandes fournisseurs** : bon de commande avant réception, réceptions partielles, rapprochement avec la facture.
 4. **Compléments consignes** : facturation d'un casier non rendu (conversion en dette d'argent via `deposit_amount`), consigne payée par un client anonyme, bouteilles vendues à l'unité.
 5. **Corrections après clôture** : annulation tardive d'une vente, remboursement client, avoir (écriture dans la caisse courante, sans rouvrir la caisse clôturée).
@@ -267,6 +282,7 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - **Annulations** : uniquement tant que la caisse de la vente (ou des règlements cash de l'achat) est ouverte ; après clôture, pas de correction automatique (voir §9). Annulation totale seulement (pas de retour partiel d'une ligne). Le dernier coût d'achat du produit n'est pas rétabli après l'annulation d'un achat. Pas d'annulation de dépense ni de remboursement de dette.
 - **Achats** : une réception = un achat (pas de bon de commande ni de réception partielle). Le coût du produit est le **dernier coût d'achat** (pas de coût moyen pondéré). Dette fournisseur jamais négative (pas d'avance) ; un règlement ne peut pas dépasser la dette. Seul le gérant règle un fournisseur ; les paiements MoMo/bank ne sont suivis que dans le journal (pas de rapprochement bancaire). Pas d'annulation d'achat.
 - **Dette ≥ 0** : pas d'avance ni d'avoir client ; un paiement ne peut pas dépasser la dette.
+- **Personnel** : `must_change_password` est un **indicateur** pour le front, l'API n'empêche pas d'utiliser le reste de l'API avec un mot de passe provisoire. Pas de mot de passe oublié en libre-service (le gérant réinitialise) ; pas d'expiration des tokens ; pas de limitation de débit sur `me/password`. Le garde-fou « dernier gérant » n'est atteignable que par des requêtes simultanées de deux gérants (un gérant ne peut pas se toucher lui-même). Pas de suppression de compte, par choix. Les actions sur les comptes ne sont pas encore journalisées (voir audit, §9).
 - **Vendeurs et caissiers voient tous les clients** et leurs dettes (pas de cloisonnement par vendeur).
 - **Pas de TVA ni de facturation normalisée.** Seule la logique de caisse est couverte.
 - **Provisioning manuel** : chaque nouveau dépôt demande la création d'une base dans cPanel.
@@ -314,6 +330,7 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - `depot-rapports.patch` : endpoints de rapports (`ReportService`, `ReportController`), `ReportTest` (14 tests).
 - `depot-annulations.patch` : annulation de vente et d'achat (colonnes `voided_*`, contre-écritures), `VoidTest` (17 tests).
 - `depot-achats.patch` : fournisseurs, achats, dettes fournisseurs, casiers dus à la brasserie, `PurchaseTest` (modifie `CashSession`, `ContainerService`, `ContainerController`, `routes/depot/operations.php`).
+- `depot-personnel.patch` : gestion du personnel (`UserService`, `UserController`, `EnsureUserActive`, migration `must_change_password`, `me/password`), `PersonnelTest` (modifie `User`, `AuthController`, `DepotServiceProvider`, `routes/depot.php`, `routes/depot/operations.php`).
 - `depot-tests-fix.patch` : correctif des tests (requête « fraîche », base de test copiée).
 - `depot-tests.patch` : suite de tests (`tests/TenantTestCase.php` + 5 fichiers dans `tests/Feature`).
 - `depot-consignes.patch` : types de casiers, vides du dépôt, casiers dus par client, intégration à la vente (modifie `SaleService`, `SaleController`, `Product`, `ProductController`, `routes/depot/operations.php`).
@@ -339,6 +356,7 @@ php artisan test --filter=SalesTest
 | `ReportTest` | CA par mode de paiement, marge estimée, produit sans coût, ventes annulées exclues, dépenses/encaissements/achats, situation actuelle, filtre et validation de période, courbe jour par jour, top produits, alertes de stock, écarts de caisse, droits, isolation |
 | `VoidTest` | annulation de vente (cash, crédit + acompte, casiers), d'achat (stock, dette, règlement cash, casiers) ; refus et retour arrière complet (déjà vendu, déjà remboursé, déjà rendu, caisse clôturée), double annulation, rôles |
 | `PurchaseTest` | réception (stock, dette, dernier coût), idempotence, paiement à l'achat réservé au gérant, cash qui sort du tiroir, règlements (idempotents, plafonnés), casiers dus à la brasserie, rollback complet, rôles, isolation |
+| `PersonnelTest` | droits (gérant seul), création avec mot de passe provisoire ou fourni, email unique (casse ignorée) et rôle valide, filtres, modification, pas de changement de son propre rôle, refus avec caisse ouverte, désactivation (tokens coupés, connexion refusée, réactivation), compte désactivé refusé même avec token, réinitialisation, changement de mot de passe (autres appareils déconnectés), isolation |
 | `ContainerTest` | 10 vendus / 8 rendus → 2 dus, client anonyme équilibré, retours, rollback, produits non consignés, rôles |
 
 **Règle d'équipe** : tout nouvel endpoint reçoit au moins un test d'isolation (tenant B ne voit pas les données de A) et un test de rôle.

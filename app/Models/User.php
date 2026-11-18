@@ -19,6 +19,8 @@ class User extends Authenticatable
     use HasFactory, Notifiable;
     use HasApiTokens;
 
+    public const ROLES = ['gerant', 'caissier', 'magasinier', 'vendeur'];
+
     /**
      * Get the attributes that should be cast.
      *
@@ -29,6 +31,14 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'active' => 'boolean',
+            'must_change_password' => 'boolean',
         ];
+    }
+
+    /** Représentation exposée par l'API (jamais le mot de passe). */
+    public function toApi(): array
+    {
+        return $this->only('id', 'name', 'email', 'role', 'active', 'must_change_password', 'created_at');
     }
 }

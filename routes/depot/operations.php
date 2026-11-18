@@ -10,6 +10,7 @@ use App\Http\Controllers\ReportController;
 use App\Http\Controllers\SaleController;
 use App\Http\Controllers\StockController;
 use App\Http\Controllers\SupplierController;
+use App\Http\Controllers\UserController;
 use App\Http\Middleware\EnsureRole;
 use Illuminate\Support\Facades\Route;
 
@@ -115,3 +116,14 @@ Route::middleware(EnsureRole::class.':gerant,magasinier')->group(function () {
 });
 
 Route::middleware(EnsureRole::class.':gerant')->post('inventories/{inventory}/validate', [InventoryController::class, 'validateInventory']);
+
+// Personnel : comptes du dépôt (gérant uniquement ; jamais de suppression, on désactive)
+Route::middleware(EnsureRole::class.':gerant')->prefix('users')->group(function () {
+    Route::get('/', [UserController::class, 'index']);
+    Route::post('/', [UserController::class, 'store']);
+    Route::get('{user}', [UserController::class, 'show']);
+    Route::put('{user}', [UserController::class, 'update']);
+    Route::post('{user}/activate', [UserController::class, 'activate']);
+    Route::post('{user}/deactivate', [UserController::class, 'deactivate']);
+    Route::post('{user}/reset-password', [UserController::class, 'resetPassword']);
+});
