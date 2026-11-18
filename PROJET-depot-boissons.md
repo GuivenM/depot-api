@@ -1,6 +1,6 @@
 # Système de gestion de dépôt de boissons (SaaS) — Document de suivi
 
-_Mis à jour le 13 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
+_Mis à jour le 15 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
 
 ## 1. Vision
 
@@ -28,21 +28,22 @@ Cible technique : API Laravel + front React (PWA, mobile-first, **hors ligne**),
 ### Règles d'architecture à ne jamais casser
 
 1. **Le stock ne se modifie jamais directement.** Tout passe par `StockService::move()` (journal `stock_movements` + cache `products.stock_bottles`, dans une transaction avec verrou).
-2. **La dette client ne se modifie jamais directement.** Tout passe par `CreditService` (journal `customer_ledger` + cache `customers.balance`).
+2. **Les dettes ne se modifient jamais directement.** Dette client : `CreditService` (journal `customer_ledger` + cache `customers.balance`). Dette fournisseur : `SupplierService` (journal `supplier_ledger` + cache `suppliers.balance`).
 3. **Les prix viennent toujours du serveur**, jamais du client.
 4. **Idempotence par `uuid`** sur les ventes et les paiements (le client génère l'uuid ; un renvoi ne duplique rien).
-5. **Ordre des verrous** : caisse → client → produits (triés par id) → types de casiers (triés par id) → soldes de casiers. Évite les deadlocks.
+5. **Ordre des verrous** : caisse → client ou fournisseur → produits (triés par id) → types de casiers (triés par id) → soldes de casiers. Évite les deadlocks.
 6. **Les casiers ne se modifient jamais directement.** Tout passe par `ContainerService` (journal `container_movements` + caches `container_types.empty_stock` et `container_holdings.quantity`).
 7. **Les identifiants de base d'un tenant ne vont jamais dans le `.env`.** Ils sont portés par le tenant (voir §4).
 8. Une opération d'argent/stock/casiers = **une transaction** (vente + sorties de stock + dette + casiers ensemble, ou rien).
+9. **On ne supprime jamais, on annule par contre-écriture** : mouvements inverses tracés (stock, dettes, casiers), `status = voided` sur la vente/l'achat, `voided_at` sur les règlements.
 
 ## 3. Rôles
 
 | Rôle | Peut |
 |---|---|
-| `gerant` | Tout, y compris limites de crédit, abandon de créance, clôture d'une caisse d'autrui, dépassement de limite |
+| `gerant` | Tout, y compris limites de crédit, abandon de créance, clôture d'une caisse d'autrui, dépassement de limite, **règlements fournisseurs** et dettes fournisseurs |
 | `caissier`, `vendeur` | Ouvrir sa caisse, vendre, encaisser des remboursements, gérer des clients (sans toucher aux limites) |
-| `magasinier` | Produits, réceptions, casse, ajustements de stock |
+| `magasinier` | Produits, réceptions, casse, ajustements de stock, fournisseurs et achats (**sans pouvoir payer**) |
 
 Les rôles sont une simple colonne `users.role`, vérifiée par le middleware `EnsureRole` (`EnsureRole::class.':gerant,caissier'`).
 
@@ -107,9 +108,15 @@ Statuts : `pending_db` → `provisioning` → `active` (ou `failed`, `suspended`
 | `payments` | Remboursements de dette (`uuid` unique, `method` cash/momo, rattaché à une caisse, `sale_id` si acompte) |
 | `container_types` | Type de casier (casier + ses bouteilles) : `deposit_amount` (valeur de consigne), `empty_stock` (casiers vides au dépôt, cache) |
 | `container_holdings` | Casiers qu'un tiers doit rendre (`party_type` customer/supplier, `party_id`, `quantity`, cache) |
-| `container_movements` | **Journal des casiers** : `type` (sale_out, return_in, from_supplier, to_supplier, loss, adjustment), `party_delta`, `depot_delta`, référence polymorphe |
+| `container_movements` | **Journal des casiers** : `type` (sale_out, return_in, purchase_in, from_supplier, to_supplier, loss, adjustment), `party_delta`, `depot_delta`, référence polymorphe |
+| `suppliers` | Fournisseur : `balance` = ce que le dépôt lui doit (cache, via `SupplierService`) |
+| `supplier_ledger` | **Journal des dettes fournisseurs** : `amount` signé (+ on doit plus, − on a payé), `balance_after` |
+| `purchases` / `purchase_items` | Réceptions de marchandise (`uuid` unique, `invoice_ref`, total) et lignes (quantité, bouteilles équivalentes, `unit_cost`) |
+| `supplier_payments` | Règlements fournisseurs (`uuid` unique, `method` cash/momo/bank ; le cash est rattaché à la caisse et sort du tiroir) |
+| `inventories` / `inventory_lines` | Inventaire physique : statut (`open`/`validated`/`cancelled`), lignes produit (en bouteilles) ou casiers vides, `expected` (stock système au moment du comptage), `counted`, `difference` ; à la validation : `lines_with_gap`, `shortage_value`, `surplus_value` |
+| _(colonnes d'annulation)_ | `sales` et `purchases` : `status = voided`, `voided_at`, `voided_by`, `void_reason` ; `payments` et `supplier_payments` : `voided_at` (un règlement annulé est marqué, jamais supprimé, et exclu de la caisse) |
 
-Caisse théorique = **fond + ventes cash + remboursements de dette en cash − dépenses**. MoMo et ventes à crédit sont suivis à part et n'entrent pas dans le tiroir.
+Caisse théorique = **fond + ventes cash + remboursements de dette en cash − dépenses − règlements fournisseurs en cash**. MoMo et ventes à crédit sont suivis à part et n'entrent pas dans le tiroir.
 
 ## 6. API (préfixe `/api/v1`, en-tête `X-Tenant` obligatoire)
 
@@ -141,6 +148,24 @@ Auth : `POST login` → token ; ensuite `Authorization: Bearer <token>`.
 | GET | `customers/{id}/containers` | gérant, caissier, vendeur, magasinier | Casiers que ce client doit rendre |
 | POST | `customers/{id}/containers/returns` | idem | Le client rapporte des vides |
 | POST | `customers/{id}/containers/adjustments` | gérant | Correction / abandon de casiers dus |
+| GET/POST/PUT | `suppliers`, `suppliers/{id}` | gérant, magasinier | Fournisseurs (activation : gérant seul) |
+| GET | `suppliers/{id}/containers` | gérant, magasinier | Casiers que le dépôt doit à ce fournisseur (négatif = il nous en doit) |
+| GET/POST | `purchases` | gérant, magasinier | Réceptions de marchandise (idempotent sur `uuid`) |
+| GET | `suppliers/{id}/ledger` | gérant | Historique des dettes fournisseur |
+| POST | `suppliers/{id}/payments` | gérant | Règlement fournisseur (cash/momo/bank, idempotent, plafonné à la dette) |
+| POST | `suppliers/{id}/adjustments` | gérant | Correction de dette fournisseur |
+| GET | `payables` | gérant | Dettes fournisseurs : total, par fournisseur, dernier paiement |
+| POST | `sales/{id}/void` | gérant (toute vente), caissier/vendeur (les leurs) | Annuler une vente (`reason` obligatoire), caisse encore ouverte |
+| POST | `purchases/{id}/void` | gérant | Annuler une réception (`reason` obligatoire) |
+| GET | `reports/overview` | gérant | Ventes par mode de paiement, marge estimée, dépenses, encaissements, achats + situation actuelle |
+| GET | `reports/daily` | gérant | Une ligne par jour (zéros inclus), max 92 jours |
+| GET | `reports/top-products` | gérant | Produits les plus vendus (`limit`) |
+| GET | `reports/cash-sessions` | gérant | Caisses clôturées, écarts, bilan par vendeur |
+| GET | `reports/stock-alerts` | gérant, magasinier | Produits en rupture ou sous leur seuil |
+| GET/POST | `inventories`, `inventories/{id}` | gérant, magasinier | Lister / ouvrir un inventaire (une ligne par produit actif et par type de casier) / le consulter avec sa progression |
+| POST | `inventories/{id}/counts` | gérant, magasinier | Enregistrer des comptages (`crates` et/ou `bottles`, ou `quantity` pour les casiers) ; recompter remplace |
+| POST | `inventories/{id}/cancel` | gérant, magasinier | Annuler un inventaire ouvert (aucun effet sur le stock) |
+| POST | `inventories/{id}/validate` | gérant | Appliquer les écarts au stock et aux casiers vides (tout ou rien) |
 
 ### Consignes (casiers)
 Un type de casier = un casier avec ses bouteilles. On lie un produit à un type via `products.container_type_id`.
@@ -150,6 +175,34 @@ Un type de casier = un casier avec ses bouteilles. On lie un produit à un type 
 - **Client identifié** : le solde de ce qu'il doit évolue (jamais négatif).
 - **Client anonyme** : l'échange doit être équilibré (autant rendus que vendus), sinon la vente est refusée (« sélectionnez un client »).
 - Le stock de vides du dépôt se renseigne par `containers/depot-movements` (par exemple `adjustment` pour l'inventaire initial).
+
+### Achats et fournisseurs
+`POST purchases` enregistre une **réception** : fournisseur, lignes (`unit_cost` par casier ou bouteille), `invoice_ref` optionnel. Dans une seule transaction : entrée en stock (journal), dette fournisseur, mise à jour du **dernier coût** du produit (`cost_crate`), et casiers.
+
+- **Casiers** : les casiers pleins reçus de produits consignés sont dus au fournisseur ; `empties_returned` indique les vides rendus à la brasserie (ils sortent du stock de vides du dépôt, refusé s'il n'y en a pas assez). Le solde envers un fournisseur peut devenir négatif (c'est lui qui nous doit des casiers).
+- **Paiement** : `paid_now` + `paid_method` (cash, momo, bank), **gérant seulement**. Un paiement cash exige la caisse ouverte du gérant et sort du tiroir. Le magasinier reçoit la marchandise à crédit, le gérant règle ensuite (`suppliers/{id}/payments`).
+
+### Inventaire physique
+Le magasinier compte, le gérant valide. À l'ouverture, une ligne est créée par produit actif et par type de casier. Quand une ligne est comptée, le système **mémorise le stock qu'il croyait avoir à cet instant** (`expected`) et calcule l'écart (`compté − attendu`). La validation applique **l'écart** (mouvement `inventaire` dans le journal du stock, ou des casiers vides), pas la valeur absolue : une vente faite entre le comptage et la validation reste valable (attendu 120, compté 114, vendu 24 depuis → stock final 96 − 6 = 90).
+
+- **Partiel autorisé** : les lignes non comptées sont ignorées ; au moins une ligne comptée est exigée.
+- **Tout ou rien** : si un écart rendrait un stock ou des vides négatifs (ex. beaucoup de ventes depuis le comptage), la validation est refusée (422) et l'inventaire reste ouvert ; recompter la ligne concernée.
+- **Valorisation** : manquants et excédents des produits au dernier coût (`shortage_value`, `surplus_value`). Les casiers ne sont pas valorisés.
+- Un seul inventaire ouvert à la fois. Le dernier inventaire validé apparaît dans `reports/overview` (`snapshot.last_inventory`).
+
+### Rapports et tableau de bord
+Endpoints **en lecture seule** : l'API calcule les totaux (une seule règle de calcul, cohérente avec la clôture de caisse, avec les droits), le front React n'a qu'à les afficher. Paramètres `from` et `to` au format `YYYY-MM-DD`, **heure du dépôt** (`Africa/Porto-Novo` par défaut, surchargeable par `config('depot.timezone')`) ; par défaut : aujourd'hui ; maximum 366 jours (92 pour `daily`).
+
+`GET reports/overview` renvoie `period`, `sales` (nombre, CA, par mode `cash`/`momo`/`credit`, annulées), `margin` (`estimated_cost`, `estimated_margin`, `uncosted_revenue`), `expenses`, `collections` (remboursements clients, règlements fournisseurs), `purchases` et `snapshot` (créances, dettes fournisseurs, casiers, valeur du stock au coût, produits sous le seuil).
+
+**Marge estimée** = CA des lignes dont le produit a un coût connu − quantité × **dernier coût d'achat** (`cost_crate`). Les produits sans coût sont comptés à part (`uncosted_revenue`) pour ne pas fausser la marge. Ce n'est pas une marge comptable (pas de coût moyen pondéré, pas d'historique des coûts).
+
+### Annulations
+`POST sales/{id}/void` et `POST purchases/{id}/void` (raison obligatoire) rejouent **l'inverse** des mouvements d'origine, dans une transaction :
+
+- **Vente** : le stock revient ; une vente à crédit annule sa dette et son acompte (l'acompte est rendu au client, donc il sort de la caisse) ; les casiers (dus par le client, vides rentrés au dépôt) sont restitués. La vente sort de la caisse théorique. Possible **tant que sa caisse est ouverte**.
+- **Achat** (gérant) : la marchandise sort du stock, la dette et les règlements sont annulés (un règlement cash revient en caisse), les casiers dus à la brasserie sont restitués.
+- **Refusé (422) avec retour arrière complet** si l'annulation rendrait un stock, une dette ou un solde de casiers **négatif** : marchandise d'un achat déjà vendue, client qui a déjà remboursé davantage que le reste dû, casiers déjà rendus depuis, vides déjà renvoyés. Dans ce cas, corriger d'abord par un ajustement. Une opération déjà annulée renvoie 409.
 
 ### Vente à crédit
 `POST sales` avec `payment_method: "credit"`, `customer_id`, et optionnellement `paid_now` + `paid_method` (acompte). Refusée si la dette dépasse `credit_limit`, sauf `override_limit: true` par un gérant. Un paiement ne peut pas dépasser la dette.
@@ -172,30 +225,34 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - [x] Caisse par sessions, dépenses, clôture avec écart, ventes idempotentes (cash / MoMo)
 - [x] Clients, crédit, limites, remboursements, créances, ledger des dettes _(patch crédits)_
 - [x] Consignes : types de casiers, vides du dépôt, casiers dus par client, retours à la vente ou après, journal des casiers _(patch consignes)_
+- [x] Inventaire physique : comptage produits et casiers vides, écarts relatifs, validation tout ou rien, valorisation, dernier inventaire dans le tableau de bord _(patch inventaire)_
+- [x] Rapports et tableau de bord côté API : vue d'ensemble, courbe journalière, top produits, alertes de stock, écarts de caisse _(patch rapports)_
+- [x] Annulation de vente et d'achat (contre-écritures sur stock, dettes, casiers et caisse) _(patch annulations)_
+- [x] Achats et fournisseurs : réceptions liées au stock, dettes fournisseurs (journal), règlements, casiers dus à la brasserie, dernier coût _(patch achats)_
+- [x] Suite de tests d'API (47 tests : isolation entre tenants, stock, ventes/caisse, crédit, consignes) _(patch tests : 47/47 verts à la première exécution, voir §15)_
 
 ## 9. Reste à faire (ordre suggéré)
 
 **Cœur métier**
-1. **Achats et fournisseurs** : commandes, réceptions liées au stock, factures, **dettes fournisseurs** (journal symétrique aux clients) et **casiers dus à la brasserie** (le `party_type = supplier` est déjà prévu dans `container_holdings`).
-2. **Annulation de vente** : restitution du stock, correction de caisse, de dette et de casiers, avec trace.
-3. **Compléments consignes** : facturation d'un casier non rendu (conversion en dette d'argent via `deposit_amount`), consigne payée par un client anonyme, bouteilles vendues à l'unité.
-4. **Inventaire physique** : comptage, écarts, mouvement `inventaire` (produits et casiers vides).
-5. **Personnel** : CRUD utilisateurs, désactivation, changement/réinitialisation de mot de passe.
-6. **Audit** : historique des modifications sensibles (prix, limites, ajustements) — `audit_logs`.
-7. **Dashboard et rapports** : CA du jour, dépenses, bénéfice estimé, alertes de stock, bilans jour/semaine/mois, PDF (factures, tickets, clôture de caisse).
+1. **Personnel** : CRUD utilisateurs, désactivation, changement/réinitialisation de mot de passe.
+2. **Audit** : historique des modifications sensibles (prix, limites, ajustements) — `audit_logs`.
+3. **Commandes fournisseurs** : bon de commande avant réception, réceptions partielles, rapprochement avec la facture.
+4. **Compléments consignes** : facturation d'un casier non rendu (conversion en dette d'argent via `deposit_amount`), consigne payée par un client anonyme, bouteilles vendues à l'unité.
+5. **Corrections après clôture** : annulation tardive d'une vente, remboursement client, avoir (écriture dans la caisse courante, sans rouvrir la caisse clôturée).
+6. **Rapports PDF et exports** : bilan jour/semaine/mois, ticket de caisse, facture, export Excel ; comparaison de périodes ; rapport par vendeur ; historique des inventaires.
 
 **Produit**
-8. **Front React PWA** (mobile-first) : vente rapide au comptoir, caisse, stock, clients, casiers.
-9. **Hors ligne** : cache IndexedDB (catalogue, clients), file de synchronisation avec uuid, résolution de conflits.
-10. **SaaS** : super-admin, plans et abonnements, facturation des dépôts, suspension automatique, inscription/onboarding.
-11. **Paiement MoMo** intégré, notifications WhatsApp/SMS pour relancer les dettes.
+7. **Front React PWA** (mobile-first) : vente rapide au comptoir, caisse, stock, clients, casiers, achats, annulations, inventaire, tableau de bord (consomme `reports/*`).
+8. **Hors ligne** : cache IndexedDB (catalogue, clients), file de synchronisation avec uuid, résolution de conflits.
+9. **SaaS** : super-admin, plans et abonnements, facturation des dépôts, suspension automatique, inscription/onboarding.
+10. **Paiement MoMo** intégré, notifications WhatsApp/SMS pour relancer les dettes.
 
 **Industrialisation**
-12. **Tests automatisés**, dont l'**isolation entre tenants** (un tenant ne voit jamais les données d'un autre) sur chaque endpoint.
-13. **Sauvegardes** : `mysqldump` par tenant (cron) avec stockage hors serveur, export à la demande.
-14. **Suivi des migrations** par tenant (échecs isolés) et exécution par lots.
-15. **Sécurité** : limitation de débit sur `login`, expiration des tokens, chiffrement des identifiants de base dans `tenants.data`, en-têtes CORS/HTTPS stricts.
-16. **Migration vers VPS** (voir §11).
+11. **Compléter les tests** : concurrence (deux ventes simultanées), `ManualProvisioner` / `depot:provision` (nécessitent MySQL), hors ligne, et un test d'isolation à chaque nouvel endpoint. Brancher la suite en CI.
+12. **Sauvegardes** : `mysqldump` par tenant (cron) avec stockage hors serveur, export à la demande.
+13. **Suivi des migrations** par tenant (échecs isolés) et exécution par lots.
+14. **Sécurité** : limitation de débit sur `login`, expiration des tokens, chiffrement des identifiants de base dans `tenants.data`, en-têtes CORS/HTTPS stricts, 404 JSON propre pour un tenant inconnu.
+15. **Migration vers VPS** (voir §11) ; vérifier la performance des rapports sur de gros volumes (index, éventuellement tables d'agrégats).
 
 ## 10. Limites connues
 
@@ -204,14 +261,19 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - **Pas d'annulation de vente** ni de remboursement client pour l'instant.
 - **Consignes** : seuls les casiers vendus **en casier** (`unit: crate`) de produits consignés sont suivis ; les bouteilles vendues à l'unité et leurs vides ne le sont pas. Un casier est suivi avec ses bouteilles (pas de suivi séparé).
 - **Consignes** : aucune facturation automatique d'un casier non rendu (`deposit_amount` ne sert qu'à valoriser). Un client anonyme doit rendre autant de casiers qu'il en achète.
-- **Consignes** : pas de retour anticipé (solde de casiers jamais négatif) ; le stock de vides du dépôt doit être initialisé à la main, et les échanges avec la brasserie se saisissent comme mouvements du dépôt tant que les achats ne sont pas faits (aucune dette de casiers envers un fournisseur).
+- **Consignes** : pas de retour anticipé côté client (solde jamais négatif) ; le stock de vides du dépôt doit être initialisé à la main (`containers/depot-movements`).
+- **Inventaire** : un seul inventaire ouvert à la fois ; pas de verrouillage des ventes pendant le comptage (c'est pourquoi la validation applique l'écart et non la valeur absolue) ; pas d'annulation d'un inventaire déjà validé (corriger par un ajustement) ; les casiers vides sont comptés mais pas valorisés ; pas de comptage par emplacement ni par lot.
+- **Rapports** : marge = estimation avec le dernier coût d'achat ; la courbe journalière est agrégée en PHP (limitée à 92 jours) ; pas de comparaison de périodes ni d'export. Les dates sont interprétées en heure du Bénin, le stockage reste en UTC.
+- **Annulations** : uniquement tant que la caisse de la vente (ou des règlements cash de l'achat) est ouverte ; après clôture, pas de correction automatique (voir §9). Annulation totale seulement (pas de retour partiel d'une ligne). Le dernier coût d'achat du produit n'est pas rétabli après l'annulation d'un achat. Pas d'annulation de dépense ni de remboursement de dette.
+- **Achats** : une réception = un achat (pas de bon de commande ni de réception partielle). Le coût du produit est le **dernier coût d'achat** (pas de coût moyen pondéré). Dette fournisseur jamais négative (pas d'avance) ; un règlement ne peut pas dépasser la dette. Seul le gérant règle un fournisseur ; les paiements MoMo/bank ne sont suivis que dans le journal (pas de rapprochement bancaire). Pas d'annulation d'achat.
 - **Dette ≥ 0** : pas d'avance ni d'avoir client ; un paiement ne peut pas dépasser la dette.
 - **Vendeurs et caissiers voient tous les clients** et leurs dettes (pas de cloisonnement par vendeur).
 - **Pas de TVA ni de facturation normalisée.** Seule la logique de caisse est couverte.
 - **Provisioning manuel** : chaque nouveau dépôt demande la création d'une base dans cPanel.
 - **Pas de rapports ni de PDF** pour l'instant ; le dashboard n'existe pas.
 - **Identifiants de base en clair** dans `tenants.data` (à chiffrer avant la production).
-- **Code non testé automatiquement** : seuls des contrôles de syntaxe et des essais manuels ont été faits. Ne pas mettre en production avant les tests d'isolation.
+- **Tests** : la suite passe (§15) mais ne couvre ni la concurrence, ni le provisioning MySQL, ni le hors ligne.
+- **Tenant inconnu ou en-tête `X-Tenant` absent** : la requête est refusée (code ≥ 400) mais l'API renvoie aujourd'hui une erreur serveur au lieu d'un 404 JSON propre (exception `TenantCouldNotBeIdentified...` non interceptée).
 - **Cache Tenancy désactivé** (mutualisé) : à rétablir avec Redis sur VPS.
 - Limites de requêtes d'un mutualisé : migrations de nombreux tenants à lancer en CLI ou par lots (timeouts PHP).
 
@@ -232,6 +294,7 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 | `Table 'users' already exists` pendant `depot:provision` | `.env` pointait sur la base d'un tenant et un `migrate` y a créé les tables | `.env` = base centrale uniquement |
 | `Database connection [tenant] not configured` | Tenancy non initialisé (listeners/bootstrappers retirés) | Garder `BootstrapTenancy`, `DatabaseTenancyBootstrapper` |
 | `Unknown database 'laravel'` | Connexion modèle `mysql` sans base | Connexion `tenant_template` sur `information_schema` |
+| `php artisan test` n'affiche **rien** (même pour un seul fichier) | Une classe de test déclare une méthode d'aide qui porte le nom d'une méthode de `TestCase` (ex. `count()`, déjà `public` dans PHPUnit) : erreur fatale au chargement, avalée par l'affichage de `artisan test` | Renommer la méthode (`submitCounts`, `countLines`…). Pour voir l'erreur, lancer `vendor\bin\phpunit <fichier>` |
 | `auth:sanctum` cherche les tokens dans la mauvaise base | Middleware Tenancy pas prioritaire | `makeTenancyMiddlewareHighestPriority()` |
 
 ## 13. Environnement local (référence)
@@ -245,4 +308,46 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - `depot-socle.patch` : Tenancy, provisioning, auth, produits de base, stock (`StockService`).
 - `depot-ventes-caisse.patch` : caisse, ventes, produits/stock (API), démo.
 - `depot-credits.patch` : clients, crédit, remboursements, créances.
+- `depot-inventaire-fix.patch` : renomme l'aide `count()` de `InventoryTest` (conflit avec `TestCase::count()`).
+- `depot-inventaire.patch` : inventaire physique (`InventoryService`, `InventoryController`), `last_inventory` dans le tableau de bord, `InventoryTest` (16 tests).
+- `README.md` : présentation et mise en route du projet (à la racine du dépôt).
+- `depot-rapports.patch` : endpoints de rapports (`ReportService`, `ReportController`), `ReportTest` (14 tests).
+- `depot-annulations.patch` : annulation de vente et d'achat (colonnes `voided_*`, contre-écritures), `VoidTest` (17 tests).
+- `depot-achats.patch` : fournisseurs, achats, dettes fournisseurs, casiers dus à la brasserie, `PurchaseTest` (modifie `CashSession`, `ContainerService`, `ContainerController`, `routes/depot/operations.php`).
+- `depot-tests-fix.patch` : correctif des tests (requête « fraîche », base de test copiée).
+- `depot-tests.patch` : suite de tests (`tests/TenantTestCase.php` + 5 fichiers dans `tests/Feature`).
 - `depot-consignes.patch` : types de casiers, vides du dépôt, casiers dus par client, intégration à la vente (modifie `SaleService`, `SaleController`, `Product`, `ProductController`, `routes/depot/operations.php`).
+
+## 15. Tests
+
+```bash
+php artisan test                 # toute la suite
+php artisan test --filter=SalesTest
+```
+
+**Principe** : tests d'API de bout en bout (en-tête `X-Tenant`, vrai login Sanctum, vraies routes, vrais rôles). La base centrale est celle de phpunit (SQLite en mémoire) ; chaque dépôt de test a **sa propre base SQLite** (`database/testing_*.sqlite`), créée via `AutoProvisioner` puis migrée avec les vraies migrations tenant. Pas besoin de MySQL. Les fichiers sont supprimés en fin de test.
+
+**Prérequis** : `phpunit.xml` avec `DB_CONNECTION=sqlite` et `DB_DATABASE=:memory:` (défaut Laravel 11), extension `pdo_sqlite`. Conseillé : ajouter `database/testing_*.sqlite` au `.gitignore`.
+
+| Fichier | Couvre |
+|---|---|
+| `TenantIsolationTest` | requête sans/avec mauvais tenant, token d'un dépôt refusé dans un autre (et inversement), données qui ne fuient pas, même email dans deux dépôts, dépôt suspendu, utilisateur désactivé, rôles |
+| `StockTest` | réception, casse, ajustements, stock jamais négatif, journal = cache |
+| `SalesTest` | prix serveur, idempotence, rollback complet si stock insuffisant, caisse obligatoire, une caisse par vendeur, clôture et écart |
+| `CreditTest` | limite, acompte, remboursements (cash/MoMo, idempotence, plafond), impact sur la caisse, abandon de créance, créances |
+| `InventoryTest` | ouverture (produits actifs + casiers), un seul inventaire ouvert, comptages et recomptage, écarts relatifs (ventes après comptage), lignes non comptées ignorées, tout ou rien (stock ou vides négatifs), valorisation, cycle de vie, droits, tableau de bord, isolation |
+| `ReportTest` | CA par mode de paiement, marge estimée, produit sans coût, ventes annulées exclues, dépenses/encaissements/achats, situation actuelle, filtre et validation de période, courbe jour par jour, top produits, alertes de stock, écarts de caisse, droits, isolation |
+| `VoidTest` | annulation de vente (cash, crédit + acompte, casiers), d'achat (stock, dette, règlement cash, casiers) ; refus et retour arrière complet (déjà vendu, déjà remboursé, déjà rendu, caisse clôturée), double annulation, rôles |
+| `PurchaseTest` | réception (stock, dette, dernier coût), idempotence, paiement à l'achat réservé au gérant, cash qui sort du tiroir, règlements (idempotents, plafonnés), casiers dus à la brasserie, rollback complet, rôles, isolation |
+| `ContainerTest` | 10 vendus / 8 rendus → 2 dus, client anonyme équilibré, retours, rollback, produits non consignés, rôles |
+
+**Règle d'équipe** : tout nouvel endpoint reçoit au moins un test d'isolation (tenant B ne voit pas les données de A) et un test de rôle.
+
+**Piège** : ne jamais nommer une méthode d'aide de test comme une méthode de `TestCase` (`count`, `name`, `status`, `run`, `get`, `post`, `json`, `call`…). PHP lève une erreur fatale au chargement et `php artisan test` n'affiche alors aucune sortie ; lancer `vendor\bin\phpunit` pour la voir.
+
+**Non couvert** : concurrence, `ManualProvisioner` et `depot:provision` (demandent une vraie base MySQL), hors ligne, performances.
+
+**Résultat de la première exécution (15 nov.)** : 47 tests de la suite passent. Trois points à noter :
+- `tests/Feature/ExampleTest.php` (test par défaut de Laravel, qui appelle `/`) échoue sur une API : le supprimer.
+- `test_depot_suspendu_est_refuse` échouait parce que, dans un même test, le tenant restait initialisé entre deux requêtes (ancien statut en mémoire). En production chaque requête résout le tenant à nouveau. Les tests simulent maintenant une requête fraîche (`tenancy()->end()` avant chaque appel).
+- Durée de 8 min : chaque dépôt de test rejouait toutes les migrations. Une base tenant migrée est maintenant construite une seule fois par exécution puis copiée (`depot-tests-fix.patch`).
