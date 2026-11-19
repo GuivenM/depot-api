@@ -3,7 +3,9 @@
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Exceptions\ThrottleRequestsException;
 use Illuminate\Http\Request;
+use Stancl\Tenancy\Contracts\TenantCouldNotBeIdentifiedException;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -19,4 +21,19 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
         );
+
+        // En-tête X-Tenant absent ou dépôt inconnu : même réponse dans les deux cas (on ne révèle pas quels dépôts existent).
+        $exceptions->render(function (TenantCouldNotBeIdentifiedException $e, Request $request) {
+            return response()->json(['message' => 'Dépôt introuvable : vérifiez l\'en-tête X-Tenant.'], 404);
+        });
+
+        $exceptions->render(function (ThrottleRequestsException $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            $retry = (int) ($e->getHeaders()['Retry-After'] ?? 60);
+
+            return response()->json(['message' => "Trop de tentatives. Réessayez dans {$retry} secondes."], 429, $e->getHeaders());
+        });
     })->create();

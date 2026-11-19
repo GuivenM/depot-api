@@ -1,6 +1,6 @@
 # Système de gestion de dépôt de boissons (SaaS) — Document de suivi
 
-_Mis à jour le 19 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
+_Mis à jour le 20 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
 
 ## 1. Vision
 
@@ -183,6 +183,12 @@ Le gérant gère les comptes ; **aucun compte n'est jamais supprimé** (il est r
 - **Garde-fous** : on ne peut ni désactiver son propre compte, ni changer son propre rôle, ni réinitialiser son propre mot de passe (il utilise `me/password`). Il doit toujours rester au moins un gérant actif (409).
 - Les emails sont enregistrés en minuscules, uniques **dans le dépôt** (le même email peut exister dans deux dépôts).
 
+### Sécurité
+- **Limitation de débit** (réponse 429 en JSON avec `Retry-After`) : `login` est limité à **5 tentatives/minute par dépôt + email + IP** et **30/minute par IP** (tous emails confondus) ; `me/password` à **5/minute par utilisateur**. Réglable par `DEPOT_LOGIN_ATTEMPTS`, `DEPOT_LOGIN_ATTEMPTS_IP`, `DEPOT_PASSWORD_ATTEMPTS`. Les compteurs vivent dans le cache `file` (`RATE_LIMITER_STORE`).
+- **Expiration des tokens** : 7 jours par défaut (`SANCTUM_EXPIRATION`, en minutes ; `0` = jamais). `login` renvoie `expires_at` ; passé ce délai l'API répond 401 et le front redemande le mot de passe. Les ventes faites hors ligne gardent leur `uuid` : elles se synchronisent après la reconnexion. Nettoyage quotidien des tokens expirés (`sanctum:prune-expired`) planifié pour chaque dépôt : il demande le cron `php artisan schedule:run` ; sans lui, les tokens expirés restent refusés mais s'accumulent.
+- **Dépôt inconnu ou `X-Tenant` absent** : 404 JSON, **même message** dans les deux cas (on ne révèle pas quels dépôts existent).
+- **Mot de passe de la base d'un dépôt chiffré** dans `tenants.data` (cast `encrypted` de Laravel, clé = `APP_KEY`). Le nom de base et l'utilisateur restent en clair. Un mot de passe encore en clair reste lisible (il n'y a pas de coupure de service) ; `php artisan depot:encrypt-credentials` le chiffre définitivement (idempotent, à lancer une fois après la mise à jour). ⚠️ **Sauvegarder `APP_KEY` hors du serveur** : sans elle, les mots de passe des bases sont perdus.
+
 ### Audit
 Le journal répond à « qui a changé quoi, quand ». Il s'ajoute aux journaux métier (stock, dettes, casiers), qui tracent les **mouvements** ; l'audit trace les **décisions et modifications sensibles**. Toute écriture passe par `AuditService`, **dans la transaction de l'action** : si l'action échoue, aucune trace ; si elle réussit, la trace existe. Une entrée n'est jamais modifiée ni supprimée (le modèle `AuditLog` refuse `update` et `delete`). Jamais de mot de passe ni de secret dans `details`.
 
@@ -253,6 +259,7 @@ php artisan migrate                              # base centrale
 php artisan tenants:migrate [--tenants=<id>]     # bases des dépôts (à relancer après chaque nouvelle migration tenant, ex. personnel)
 php artisan depot:provision <tenant> --email=... # prépare + migre + crée le gérant
 php artisan depot:demo <tenant>                  # 3 produits de démo avec stock
+php artisan depot:encrypt-credentials            # chiffre les mots de passe de base encore en clair (une fois, après mise à jour)
 ```
 
 ## 8. Fait
@@ -270,6 +277,7 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - [x] Achats et fournisseurs : réceptions liées au stock, dettes fournisseurs (journal), règlements, casiers dus à la brasserie, dernier coût _(patch achats)_
 - [x] Personnel : création, modification, désactivation/réactivation, réinitialisation et changement de mot de passe, garde-fous (dernier gérant, caisse ouverte), refus des comptes désactivés même avec token _(patch personnel)_
 - [x] Audit : journal immuable `audit_logs` écrit dans la transaction de l'action (prix, limites, ajustements, casse, annulations, dépassements de limite, inventaires, écarts de caisse, comptes) et endpoint de consultation filtrable _(patch audit)_
+- [x] Sécurité : limitation de débit (login, mot de passe), expiration des tokens, 404 JSON uniforme pour un dépôt inconnu, mot de passe de base chiffré + commande de migration _(patch sécurité)_
 - [x] Suite de tests d'API (47 tests : isolation entre tenants, stock, ventes/caisse, crédit, consignes) _(patch tests : 47/47 verts à la première exécution, voir §15)_
 
 ## 9. Reste à faire (ordre suggéré)
@@ -292,7 +300,7 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 11. **Compléter les tests** : concurrence (deux ventes simultanées), `ManualProvisioner` / `depot:provision` (nécessitent MySQL), hors ligne, et un test d'isolation à chaque nouvel endpoint. Brancher la suite en CI.
 12. **Sauvegardes** : `mysqldump` par tenant (cron) avec stockage hors serveur, export à la demande.
 13. **Suivi des migrations** par tenant (échecs isolés) et exécution par lots.
-14. **Sécurité** : limitation de débit sur `login`, expiration des tokens, chiffrement des identifiants de base dans `tenants.data`, en-têtes CORS/HTTPS stricts, 404 JSON propre pour un tenant inconnu.
+14. **Sécurité** : ~~limitation de débit sur `login`, expiration des tokens, chiffrement des identifiants de base, 404 JSON pour un tenant inconnu~~ fait (§6 « Sécurité »). Reste : en-têtes CORS/HTTPS stricts, limitation de débit avant l'identification du dépôt (requêtes sur des dépôts inconnus), verrouillage d'un compte après trop d'échecs répartis sur plusieurs IP.
 15. **Migration vers VPS** (voir §11) ; vérifier la performance des rapports sur de gros volumes (index, éventuellement tables d'agrégats).
 
 ## 10. Limites connues
@@ -308,16 +316,15 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - **Annulations** : uniquement tant que la caisse de la vente (ou des règlements cash de l'achat) est ouverte ; après clôture, pas de correction automatique (voir §9). Annulation totale seulement (pas de retour partiel d'une ligne). Le dernier coût d'achat du produit n'est pas rétabli après l'annulation d'un achat. Pas d'annulation de dépense ni de remboursement de dette.
 - **Achats** : une réception = un achat (pas de bon de commande ni de réception partielle). Le coût du produit est le **dernier coût d'achat** (pas de coût moyen pondéré). Dette fournisseur jamais négative (pas d'avance) ; un règlement ne peut pas dépasser la dette. Seul le gérant règle un fournisseur ; les paiements MoMo/bank ne sont suivis que dans le journal (pas de rapprochement bancaire). Pas d'annulation d'achat.
 - **Dette ≥ 0** : pas d'avance ni d'avoir client ; un paiement ne peut pas dépasser la dette.
-- **Personnel** : `must_change_password` est un **indicateur** pour le front, l'API n'empêche pas d'utiliser le reste de l'API avec un mot de passe provisoire. Pas de mot de passe oublié en libre-service (le gérant réinitialise) ; pas d'expiration des tokens ; pas de limitation de débit sur `me/password`. Le garde-fou « dernier gérant » n'est atteignable que par des requêtes simultanées de deux gérants (un gérant ne peut pas se toucher lui-même). Pas de suppression de compte, par choix. Les actions sur les comptes ne sont pas encore journalisées (voir audit, §9).
+- **Personnel** : `must_change_password` est un **indicateur** pour le front, l'API n'empêche pas d'utiliser le reste de l'API avec un mot de passe provisoire. Pas de mot de passe oublié en libre-service (le gérant réinitialise). Le garde-fou « dernier gérant » n'est atteignable que par des requêtes simultanées de deux gérants (un gérant ne peut pas se toucher lui-même). Pas de suppression de compte, par choix. Les actions sur les comptes ne sont pas encore journalisées (voir audit, §9).
 - **Audit** : immuable côté application (modèle `AuditLog`), mais pas côté base : quelqu'un qui a accès à MySQL peut modifier la table (pas de signature ni de chaînage des entrées). Pas de rotation ni d'archivage (la table grossit avec l'activité sensible, pas avec chaque vente). Les ventes, paiements et mouvements courants ne sont pas dans l'audit : ils ont leurs propres journaux. Pas d'audit des connexions (ni échecs de login). Les champs `from`/`to` reprennent la valeur brute de la base. Un compte supprimé ne peut pas exister (on désactive), donc `user` n'est jamais nul en pratique.
 - **Vendeurs et caissiers voient tous les clients** et leurs dettes (pas de cloisonnement par vendeur).
 - **Pas de TVA ni de facturation normalisée.** Seule la logique de caisse est couverte.
 - **Provisioning manuel** : chaque nouveau dépôt demande la création d'une base dans cPanel.
 - **Pas de rapports ni de PDF** pour l'instant ; le dashboard n'existe pas.
-- **Identifiants de base en clair** dans `tenants.data` (à chiffrer avant la production).
 - **Tests** : la suite passe (§15) mais ne couvre ni la concurrence, ni le provisioning MySQL, ni le hors ligne.
-- **Tenant inconnu ou en-tête `X-Tenant` absent** : la requête est refusée (code ≥ 400) mais l'API renvoie aujourd'hui une erreur serveur au lieu d'un 404 JSON propre (exception `TenantCouldNotBeIdentified...` non interceptée).
 - **Cache Tenancy désactivé** (mutualisé) : à rétablir avec Redis sur VPS.
+- **Sécurité** : la limite de connexion par dépôt + email + IP n'arrête pas une attaque répartie sur beaucoup d'adresses IP contre un seul compte (un verrouillage de compte serait possible mais permettrait de bloquer un gérant à volonté). Les mots de passe de base sont chiffrés avec `APP_KEY` : quiconque a l'accès au serveur voit aussi `.env`, donc ce chiffrement protège surtout les sauvegardes et les exports de la base centrale. Le nom de base et l'utilisateur MySQL restent en clair.
 - Limites de requêtes d'un mutualisé : migrations de nombreux tenants à lancer en CLI ou par lots (timeouts PHP).
 
 ## 11. Migration vers VPS (checklist)
@@ -338,13 +345,14 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 | `Database connection [tenant] not configured` | Tenancy non initialisé (listeners/bootstrappers retirés) | Garder `BootstrapTenancy`, `DatabaseTenancyBootstrapper` |
 | `Unknown database 'laravel'` | Connexion modèle `mysql` sans base | Connexion `tenant_template` sur `information_schema` |
 | `php artisan test` n'affiche **rien** (même pour un seul fichier) | Une classe de test déclare une méthode d'aide qui porte le nom d'une méthode de `TestCase` (ex. `count()`, déjà `public` dans PHPUnit) : erreur fatale au chargement, avalée par l'affichage de `artisan test` | Renommer la méthode (`submitCounts`, `countLines`…). Pour voir l'erreur, lancer `vendor\bin\phpunit <fichier>` |
+| Erreur « table cache introuvable » sur `login` | Le limiteur utilisait le cache `database`, dont la connexion par défaut est devenue celle du dépôt | `RATE_LIMITER_STORE=file` (`config/cache.php`, clé `limiter`) |
 | `auth:sanctum` cherche les tokens dans la mauvaise base | Middleware Tenancy pas prioritaire | `makeTenancyMiddlewareHighestPriority()` |
 
 ## 13. Environnement local (référence)
 
 - PHP 8.5 en local ; **vérifier la version PHP du forfait Namecheap** avant déploiement.
 - Base centrale SQLite ; MySQL local pour les bases des dépôts (Laragon/XAMPP).
-- Variables `.env` propres à ce projet : `DB_CONNECTION=sqlite`, `TENANT_DB_HOST/PORT/USERNAME/PASSWORD`, `TENANT_PROVISIONER=manual`.
+- Variables `.env` propres à ce projet : `DB_CONNECTION=sqlite`, `TENANT_DB_HOST/PORT/USERNAME/PASSWORD`, `TENANT_PROVISIONER=manual`, `RATE_LIMITER_STORE=file`, `SANCTUM_EXPIRATION`, `DEPOT_LOGIN_ATTEMPTS`, `DEPOT_LOGIN_ATTEMPTS_IP`, `DEPOT_PASSWORD_ATTEMPTS`. `phpunit.xml` règle les limites très haut pour que la suite ne se bloque pas elle-même.
 
 ## 14. Livrables déjà produits
 
@@ -359,6 +367,7 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - `depot-achats.patch` : fournisseurs, achats, dettes fournisseurs, casiers dus à la brasserie, `PurchaseTest` (modifie `CashSession`, `ContainerService`, `ContainerController`, `routes/depot/operations.php`).
 - `depot-personnel.patch` : gestion du personnel (`UserService`, `UserController`, `EnsureUserActive`, migration `must_change_password`, `me/password`), `PersonnelTest` (modifie `User`, `AuthController`, `DepotServiceProvider`, `routes/depot.php`, `routes/depot/operations.php`).
 - `depot-audit.patch` : journal d'audit (`AuditService`, `AuditLog`, `AuditLogController`, migration `audit_logs`), branché dans les contrôleurs produits/clients/fournisseurs/casiers/stock et dans `CreditService`, `SupplierService`, `ContainerService`, `SaleService`, `PurchaseService`, `InventoryService`, `CashService`, `UserService` ; `AuditTest`. **À appliquer après `depot-personnel.patch`.**
+- `depot-securite.patch` : limitation de débit, expiration des tokens, 404 uniforme, chiffrement du mot de passe de base (`Tenant`, commande `depot:encrypt-credentials`, `bootstrap/app.php`, `DepotServiceProvider`, `config/cache.php`, `config/sanctum.php`, `config/depot.php`, `phpunit.xml`, `routes/console.php`), `SecurityTest`. **À appliquer après `depot-audit.patch`, puis lancer `php artisan depot:encrypt-credentials`.**
 - `depot-tests-fix.patch` : correctif des tests (requête « fraîche », base de test copiée).
 - `depot-tests.patch` : suite de tests (`tests/TenantTestCase.php` + 5 fichiers dans `tests/Feature`).
 - `depot-consignes.patch` : types de casiers, vides du dépôt, casiers dus par client, intégration à la vente (modifie `SaleService`, `SaleController`, `Product`, `ProductController`, `routes/depot/operations.php`).
@@ -385,6 +394,7 @@ php artisan test --filter=SalesTest
 | `VoidTest` | annulation de vente (cash, crédit + acompte, casiers), d'achat (stock, dette, règlement cash, casiers) ; refus et retour arrière complet (déjà vendu, déjà remboursé, déjà rendu, caisse clôturée), double annulation, rôles |
 | `PurchaseTest` | réception (stock, dette, dernier coût), idempotence, paiement à l'achat réservé au gérant, cash qui sort du tiroir, règlements (idempotents, plafonnés), casiers dus à la brasserie, rollback complet, rôles, isolation |
 | `PersonnelTest` | droits (gérant seul), création avec mot de passe provisoire ou fourni, email unique (casse ignorée) et rôle valide, filtres, modification, pas de changement de son propre rôle, refus avec caisse ouverte, désactivation (tokens coupés, connexion refusée, réactivation), compte désactivé refusé même avec token, réinitialisation, changement de mot de passe (autres appareils déconnectés), isolation |
+| `SecurityTest` | 404 identique pour un `X-Tenant` absent ou inconnu, limite de login (par dépôt + email + IP, puis par IP seule), 429 avec `Retry-After`, comptes et dépôts voisins épargnés, limite du changement de mot de passe, token expiré refusé, mot de passe de base chiffré au repos et lisible par l'application, mot de passe en clair existant lisible puis chiffré par la commande (idempotente) |
 | `AuditTest` | traces des prix/limites/consignes, absence de trace sans changement réel ou si l'action est refusée, abandon de créance et dette fournisseur (avant/après), casse et ajustements, vides et casiers dus, dépassement de limite seulement quand il a lieu, annulations avec raison, inventaire, clôture de caisse (écart ou tiers), comptes sans aucun mot de passe, immuabilité, droits, filtres (action, utilisateur, sujet, période), isolation |
 | `ContainerTest` | 10 vendus / 8 rendus → 2 dus, client anonyme équilibré, retours, rollback, produits non consignés, rôles |
 

@@ -24,8 +24,12 @@ class AuthController extends Controller
             throw ValidationException::withMessages(['email' => ['Identifiants invalides.']]);
         }
 
+        $minutes = (int) config('sanctum.expiration');
+        $expiresAt = $minutes > 0 ? now()->addMinutes($minutes) : null;
+
         return [
-            'token' => $user->createToken($data['device'] ?? 'web')->plainTextToken,
+            'token' => $user->createToken($data['device'] ?? 'web', ['*'], $expiresAt)->plainTextToken,
+            'expires_at' => $expiresAt,
             'user' => $user->only('id', 'name', 'email', 'role', 'must_change_password'),
         ];
     }

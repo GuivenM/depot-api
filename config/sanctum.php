@@ -50,7 +50,8 @@ return [
     |
     */
 
-    'expiration' => null,
+    // Durée de vie d'un token, en minutes (7 jours par défaut ; 0 = jamais). L'utilisateur se reconnecte ensuite.
+    'expiration' => (int) env('SANCTUM_EXPIRATION', 10080),
 
     /*
     |--------------------------------------------------------------------------

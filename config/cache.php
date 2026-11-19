@@ -18,6 +18,12 @@ return [
     'default' => env('CACHE_STORE', 'database'),
 
     /*
+    | Magasin des limiteurs de débit (login, mot de passe). Volontairement `file` : pendant une requête d'un dépôt,
+    | la connexion par défaut est celle du tenant, qui n'a pas de table `cache` (le cache `database` échouerait).
+    */
+    'limiter' => env('RATE_LIMITER_STORE', 'file'),
+
+    /*
     |--------------------------------------------------------------------------
     | Cache Stores
     |--------------------------------------------------------------------------

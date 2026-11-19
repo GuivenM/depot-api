@@ -16,7 +16,7 @@ class TenantIsolationTest extends TenantTestCase
             'email' => 'gerant@depot-a.test', 'password' => self::PASSWORD,
         ]);
 
-        $this->assertGreaterThanOrEqual(400, $response->status());
+        $response->assertStatus(404)->assertJsonPath('message', 'Dépôt introuvable : vérifiez l\'en-tête X-Tenant.');
         $this->assertNull($response->json('token'));
     }
 
@@ -28,7 +28,7 @@ class TenantIsolationTest extends TenantTestCase
         $response = $this->withHeaders(['X-Tenant' => 'nimporte-quoi', 'Authorization' => 'Bearer '.$token, 'Accept' => 'application/json'])
             ->getJson('/api/v1/me');
 
-        $this->assertGreaterThanOrEqual(400, $response->status());
+        $response->assertStatus(404)->assertJsonPath('message', 'Dépôt introuvable : vérifiez l\'en-tête X-Tenant.');   // même réponse qu'un en-tête absent
         $this->assertNull($response->json('email'));
     }
 
