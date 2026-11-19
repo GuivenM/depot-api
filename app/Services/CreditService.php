@@ -135,7 +135,11 @@ class CreditService
                 throw new DepotException('Cet ajustement rendrait la dette négative.');
             }
 
+            $before = (int) $customer->balance;
             $entry = $this->post($customer, 'adjustment', $amount, $by, null, $note);
+            app(AuditService::class)->record($by, 'customer.debt_adjusted', $customer, [
+                'amount' => $amount, 'balance_before' => $before, 'balance_after' => (int) $customer->balance,
+            ], $note);
 
             return [$customer->fresh(), $entry];
         });

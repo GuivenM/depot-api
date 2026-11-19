@@ -4,13 +4,18 @@ namespace App\Http\Controllers;
 
 use App\Models\Customer;
 use App\Models\Payment;
+use App\Services\AuditService;
 use App\Services\CreditService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\DB;
 
 class CustomerController extends Controller
 {
-    public function __construct(private CreditService $credit)
+    /** Limite de crédit et activation : réservées au gérant, donc tracées. */
+    private const WATCH = ['credit_limit', 'active'];
+
+    public function __construct(private CreditService $credit, private AuditService $audit)
     {
     }
 
@@ -30,16 +35,24 @@ class CustomerController extends Controller
 
     public function store(Request $request)
     {
-        $customer = Customer::create($this->validated($request));
+        $data = $this->validated($request);
 
-        return response()->json($customer->fresh(), 201);
+        $customer = DB::transaction(function () use ($request, $data) {
+            $customer = Customer::create($data)->fresh();
+
+            if (array_key_exists('credit_limit', $data)) {   // seul le gérant peut la fixer
+                $this->audit->record($request->user(), 'customer.created', $customer, ['values' => $this->audit->snapshot($customer, self::WATCH)]);
+            }
+
+            return $customer;
+        });
+
+        return response()->json($customer, 201);
     }
 
     public function update(Request $request, Customer $customer)
     {
-        $customer->update($this->validated($request, partial: true));
-
-        return $customer->fresh();
+        return $this->audit->updateAudited($request->user(), 'customer.updated', $customer, $this->validated($request, partial: true), self::WATCH);
     }
 
     public function ledger(Customer $customer)

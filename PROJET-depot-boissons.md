@@ -1,6 +1,6 @@
 # Système de gestion de dépôt de boissons (SaaS) — Document de suivi
 
-_Mis à jour le 18 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
+_Mis à jour le 19 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
 
 ## 1. Vision
 
@@ -113,6 +113,7 @@ Statuts : `pending_db` → `provisioning` → `active` (ou `failed`, `suspended`
 | `supplier_ledger` | **Journal des dettes fournisseurs** : `amount` signé (+ on doit plus, − on a payé), `balance_after` |
 | `purchases` / `purchase_items` | Réceptions de marchandise (`uuid` unique, `invoice_ref`, total) et lignes (quantité, bouteilles équivalentes, `unit_cost`) |
 | `supplier_payments` | Règlements fournisseurs (`uuid` unique, `method` cash/momo/bank ; le cash est rattaché à la caisse et sort du tiroir) |
+| `audit_logs` | **Journal d'audit** (immuable) : `user_id` (auteur), `action` (ex. `product.updated`), `subject_type`/`subject_id`, `details` JSON (avant/après ou contexte), `note`, `ip`, `created_at` (pas de `updated_at`) |
 | `inventories` / `inventory_lines` | Inventaire physique : statut (`open`/`validated`/`cancelled`), lignes produit (en bouteilles) ou casiers vides, `expected` (stock système au moment du comptage), `counted`, `difference` ; à la validation : `lines_with_gap`, `shortage_value`, `surplus_value` |
 | _(colonnes d'annulation)_ | `sales` et `purchases` : `status = voided`, `voided_at`, `voided_by`, `void_reason` ; `payments` et `supplier_payments` : `voided_at` (un règlement annulé est marqué, jamais supprimé, et exclu de la caisse) |
 
@@ -168,6 +169,7 @@ Auth : `POST login` → token ; ensuite `Authorization: Bearer <token>`.
 | GET | `reports/top-products` | gérant | Produits les plus vendus (`limit`) |
 | GET | `reports/cash-sessions` | gérant | Caisses clôturées, écarts, bilan par vendeur |
 | GET | `reports/stock-alerts` | gérant, magasinier | Produits en rupture ou sous leur seuil |
+| GET | `audit-logs` | gérant | Journal d'audit, du plus récent au plus ancien (50 par page). Filtres : `action` (`user.*` accepté), `user_id`, `subject_type`, `subject_id`, `from` + `to` (`YYYY-MM-DD`, heure du dépôt) |
 | GET/POST | `inventories`, `inventories/{id}` | gérant, magasinier | Lister / ouvrir un inventaire (une ligne par produit actif et par type de casier) / le consulter avec sa progression |
 | POST | `inventories/{id}/counts` | gérant, magasinier | Enregistrer des comptages (`crates` et/ou `bottles`, ou `quantity` pour les casiers) ; recompter remplace |
 | POST | `inventories/{id}/cancel` | gérant, magasinier | Annuler un inventaire ouvert (aucun effet sur le stock) |
@@ -180,6 +182,29 @@ Le gérant gère les comptes ; **aucun compte n'est jamais supprimé** (il est r
 - **Désactivation** : révoque tous les tokens du compte (déconnexion de tous ses appareils). Refusée (409) si le compte a une **caisse ouverte** : la clôturer d'abord. Même règle pour un changement de rôle.
 - **Garde-fous** : on ne peut ni désactiver son propre compte, ni changer son propre rôle, ni réinitialiser son propre mot de passe (il utilise `me/password`). Il doit toujours rester au moins un gérant actif (409).
 - Les emails sont enregistrés en minuscules, uniques **dans le dépôt** (le même email peut exister dans deux dépôts).
+
+### Audit
+Le journal répond à « qui a changé quoi, quand ». Il s'ajoute aux journaux métier (stock, dettes, casiers), qui tracent les **mouvements** ; l'audit trace les **décisions et modifications sensibles**. Toute écriture passe par `AuditService`, **dans la transaction de l'action** : si l'action échoue, aucune trace ; si elle réussit, la trace existe. Une entrée n'est jamais modifiée ni supprimée (le modèle `AuditLog` refuse `update` et `delete`). Jamais de mot de passe ni de secret dans `details`.
+
+| Action | Déclencheur | `details` |
+|---|---|---|
+| `product.created` / `product.updated` | création ; modification de nom, prix, coût, conditionnement, seuil, activation, consigne | `values` (création) ou `{champ: {from, to}}` (uniquement les champs réellement changés) |
+| `customer.created` / `customer.updated` | limite de crédit ou activation (gérant) | idem |
+| `supplier.updated` | activation | `{active: {from, to}}` |
+| `container_type.created` / `.updated` | nom, valeur de consigne, activation | idem |
+| `customer.debt_adjusted` | abandon / correction de créance | `amount`, `balance_before`, `balance_after` + `note` |
+| `supplier.debt_adjusted` | correction de dette fournisseur | idem |
+| `stock.breakage` / `stock.adjusted` | casse / ajustement manuel (les réceptions ne sont pas tracées : elles sont dans le journal du stock) | `bottles` (signé), `stock_after` + `note` |
+| `container.holding_adjusted` | correction de casiers dus par un client | `delta`, `quantity_before`, `quantity_after` |
+| `container.depot_loss` / `container.depot_adjusted` | perte / correction des vides du dépôt | `delta`, `empty_stock_before`, `empty_stock_after` |
+| `sale.limit_overridden` | le gérant vend au-delà de la limite de crédit (seulement si elle est réellement dépassée) | `balance_before`, `new_debt`, `credit_limit` |
+| `sale.voided` / `purchase.voided` | annulation | `total`, tiers concerné + `note` = raison |
+| `inventory.validated` | validation d'un inventaire | `lines_with_gap`, `shortage_value`, `surplus_value` |
+| `cash.closed` | clôture **avec écart**, ou d'une caisse par quelqu'un d'autre que son titulaire | `owner_id`, `expected_cash`, `counted_cash`, `difference` |
+| `user.created` / `user.updated` | création ; changement de nom, email ou rôle | `role`, `email` ou `{champ: {from, to}}` |
+| `user.activated` / `user.deactivated` / `user.password_reset` / `user.password_changed` | gestion des comptes (`password_changed` : l'auteur est l'intéressé) | — |
+
+Une modification qui ne change aucun champ surveillé ne laisse aucune trace.
 
 ### Consignes (casiers)
 Un type de casier = un casier avec ses bouteilles. On lie un produit à un type via `products.container_type_id`.
@@ -244,13 +269,14 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - [x] Annulation de vente et d'achat (contre-écritures sur stock, dettes, casiers et caisse) _(patch annulations)_
 - [x] Achats et fournisseurs : réceptions liées au stock, dettes fournisseurs (journal), règlements, casiers dus à la brasserie, dernier coût _(patch achats)_
 - [x] Personnel : création, modification, désactivation/réactivation, réinitialisation et changement de mot de passe, garde-fous (dernier gérant, caisse ouverte), refus des comptes désactivés même avec token _(patch personnel)_
+- [x] Audit : journal immuable `audit_logs` écrit dans la transaction de l'action (prix, limites, ajustements, casse, annulations, dépassements de limite, inventaires, écarts de caisse, comptes) et endpoint de consultation filtrable _(patch audit)_
 - [x] Suite de tests d'API (47 tests : isolation entre tenants, stock, ventes/caisse, crédit, consignes) _(patch tests : 47/47 verts à la première exécution, voir §15)_
 
 ## 9. Reste à faire (ordre suggéré)
 
 **Cœur métier**
 1. ~~**Personnel**~~ : fait (voir §8).
-2. **Audit** (y compris la création, le changement de rôle, la désactivation et la réinitialisation de mot de passe d'un compte) : historique des modifications sensibles (prix, limites, ajustements) — `audit_logs`.
+2. ~~**Audit**~~ : fait (voir §6 « Audit »). : historique des modifications sensibles (prix, limites, ajustements) — `audit_logs`.
 3. **Commandes fournisseurs** : bon de commande avant réception, réceptions partielles, rapprochement avec la facture.
 4. **Compléments consignes** : facturation d'un casier non rendu (conversion en dette d'argent via `deposit_amount`), consigne payée par un client anonyme, bouteilles vendues à l'unité.
 5. **Corrections après clôture** : annulation tardive d'une vente, remboursement client, avoir (écriture dans la caisse courante, sans rouvrir la caisse clôturée).
@@ -283,6 +309,7 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - **Achats** : une réception = un achat (pas de bon de commande ni de réception partielle). Le coût du produit est le **dernier coût d'achat** (pas de coût moyen pondéré). Dette fournisseur jamais négative (pas d'avance) ; un règlement ne peut pas dépasser la dette. Seul le gérant règle un fournisseur ; les paiements MoMo/bank ne sont suivis que dans le journal (pas de rapprochement bancaire). Pas d'annulation d'achat.
 - **Dette ≥ 0** : pas d'avance ni d'avoir client ; un paiement ne peut pas dépasser la dette.
 - **Personnel** : `must_change_password` est un **indicateur** pour le front, l'API n'empêche pas d'utiliser le reste de l'API avec un mot de passe provisoire. Pas de mot de passe oublié en libre-service (le gérant réinitialise) ; pas d'expiration des tokens ; pas de limitation de débit sur `me/password`. Le garde-fou « dernier gérant » n'est atteignable que par des requêtes simultanées de deux gérants (un gérant ne peut pas se toucher lui-même). Pas de suppression de compte, par choix. Les actions sur les comptes ne sont pas encore journalisées (voir audit, §9).
+- **Audit** : immuable côté application (modèle `AuditLog`), mais pas côté base : quelqu'un qui a accès à MySQL peut modifier la table (pas de signature ni de chaînage des entrées). Pas de rotation ni d'archivage (la table grossit avec l'activité sensible, pas avec chaque vente). Les ventes, paiements et mouvements courants ne sont pas dans l'audit : ils ont leurs propres journaux. Pas d'audit des connexions (ni échecs de login). Les champs `from`/`to` reprennent la valeur brute de la base. Un compte supprimé ne peut pas exister (on désactive), donc `user` n'est jamais nul en pratique.
 - **Vendeurs et caissiers voient tous les clients** et leurs dettes (pas de cloisonnement par vendeur).
 - **Pas de TVA ni de facturation normalisée.** Seule la logique de caisse est couverte.
 - **Provisioning manuel** : chaque nouveau dépôt demande la création d'une base dans cPanel.
@@ -331,6 +358,7 @@ php artisan depot:demo <tenant>                  # 3 produits de démo avec stoc
 - `depot-annulations.patch` : annulation de vente et d'achat (colonnes `voided_*`, contre-écritures), `VoidTest` (17 tests).
 - `depot-achats.patch` : fournisseurs, achats, dettes fournisseurs, casiers dus à la brasserie, `PurchaseTest` (modifie `CashSession`, `ContainerService`, `ContainerController`, `routes/depot/operations.php`).
 - `depot-personnel.patch` : gestion du personnel (`UserService`, `UserController`, `EnsureUserActive`, migration `must_change_password`, `me/password`), `PersonnelTest` (modifie `User`, `AuthController`, `DepotServiceProvider`, `routes/depot.php`, `routes/depot/operations.php`).
+- `depot-audit.patch` : journal d'audit (`AuditService`, `AuditLog`, `AuditLogController`, migration `audit_logs`), branché dans les contrôleurs produits/clients/fournisseurs/casiers/stock et dans `CreditService`, `SupplierService`, `ContainerService`, `SaleService`, `PurchaseService`, `InventoryService`, `CashService`, `UserService` ; `AuditTest`. **À appliquer après `depot-personnel.patch`.**
 - `depot-tests-fix.patch` : correctif des tests (requête « fraîche », base de test copiée).
 - `depot-tests.patch` : suite de tests (`tests/TenantTestCase.php` + 5 fichiers dans `tests/Feature`).
 - `depot-consignes.patch` : types de casiers, vides du dépôt, casiers dus par client, intégration à la vente (modifie `SaleService`, `SaleController`, `Product`, `ProductController`, `routes/depot/operations.php`).
@@ -357,6 +385,7 @@ php artisan test --filter=SalesTest
 | `VoidTest` | annulation de vente (cash, crédit + acompte, casiers), d'achat (stock, dette, règlement cash, casiers) ; refus et retour arrière complet (déjà vendu, déjà remboursé, déjà rendu, caisse clôturée), double annulation, rôles |
 | `PurchaseTest` | réception (stock, dette, dernier coût), idempotence, paiement à l'achat réservé au gérant, cash qui sort du tiroir, règlements (idempotents, plafonnés), casiers dus à la brasserie, rollback complet, rôles, isolation |
 | `PersonnelTest` | droits (gérant seul), création avec mot de passe provisoire ou fourni, email unique (casse ignorée) et rôle valide, filtres, modification, pas de changement de son propre rôle, refus avec caisse ouverte, désactivation (tokens coupés, connexion refusée, réactivation), compte désactivé refusé même avec token, réinitialisation, changement de mot de passe (autres appareils déconnectés), isolation |
+| `AuditTest` | traces des prix/limites/consignes, absence de trace sans changement réel ou si l'action est refusée, abandon de créance et dette fournisseur (avant/après), casse et ajustements, vides et casiers dus, dépassement de limite seulement quand il a lieu, annulations avec raison, inventaire, clôture de caisse (écart ou tiers), comptes sans aucun mot de passe, immuabilité, droits, filtres (action, utilisateur, sujet, période), isolation |
 | `ContainerTest` | 10 vendus / 8 rendus → 2 dus, client anonyme équilibré, retours, rollback, produits non consignés, rôles |
 
 **Règle d'équipe** : tout nouvel endpoint reçoit au moins un test d'isolation (tenant B ne voit pas les données de A) et un test de rôle.

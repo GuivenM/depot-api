@@ -133,7 +133,11 @@ class SupplierService
                 throw new DepotException('Cet ajustement rendrait la dette négative.');
             }
 
+            $before = (int) $supplier->balance;
             $entry = $this->post($supplier, 'adjustment', $amount, $by, null, $note);
+            app(AuditService::class)->record($by, 'supplier.debt_adjusted', $supplier, [
+                'amount' => $amount, 'balance_before' => $before, 'balance_after' => (int) $supplier->balance,
+            ], $note);
 
             return [$supplier->fresh(), $entry];
         });

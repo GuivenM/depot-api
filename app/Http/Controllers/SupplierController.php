@@ -6,13 +6,14 @@ use App\Models\ContainerHolding;
 use App\Models\ContainerType;
 use App\Models\Supplier;
 use App\Models\SupplierPayment;
+use App\Services\AuditService;
 use App\Services\SupplierService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 
 class SupplierController extends Controller
 {
-    public function __construct(private SupplierService $suppliers)
+    public function __construct(private SupplierService $suppliers, private AuditService $audit)
     {
     }
 
@@ -36,9 +37,7 @@ class SupplierController extends Controller
 
     public function update(Request $request, Supplier $supplier)
     {
-        $supplier->update($this->validated($request, partial: true));
-
-        return $supplier->fresh();
+        return $this->audit->updateAudited($request->user(), 'supplier.updated', $supplier, $this->validated($request, partial: true), ['active']);
     }
 
     public function ledger(Supplier $supplier)

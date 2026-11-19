@@ -54,7 +54,7 @@ class UserController extends Controller
             'password' => 'nullable|string|min:8|max:100',
         ]);
 
-        [$user, $generated] = $this->users->create($data);
+        [$user, $generated] = $this->users->create($request->user(), $data);
 
         return response()->json(array_filter([
             'user'               => $user->toApi(),

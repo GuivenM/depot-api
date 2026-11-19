@@ -144,6 +144,10 @@ class InventoryService
                 'surplus_value'  => $surplus,
             ]);
 
+            app(AuditService::class)->record($by, 'inventory.validated', $inventory, [
+                'lines_with_gap' => $gaps, 'shortage_value' => $shortage, 'surplus_value' => $surplus,
+            ]);
+
             return $inventory;
         });
     }

@@ -90,6 +90,11 @@ class SaleService
                 'void_reason' => $reason,
             ]);
 
+            app(AuditService::class)->record($by, 'sale.voided', $sale, [
+                'total' => (int) $sale->total, 'payment_method' => $sale->payment_method,
+                'customer_id' => $sale->customer_id, 'sold_by' => $sale->user_id,
+            ], $reason);
+
             return $sale->load('items');
         });
     }
@@ -159,6 +164,7 @@ class SaleService
         }
 
         $paidNow = 0;
+        $limitOverride = null;
 
         if ($isCredit) {
             $paidNow = (int) ($data['paid_now'] ?? 0);
@@ -172,6 +178,13 @@ class SaleService
 
             $newDebt = $total - $paidNow;
             $override = $by->role === 'gerant' && ! empty($data['override_limit']);
+
+            if ($override && $customer->balance + $newDebt > $customer->credit_limit) {
+                $limitOverride = [
+                    'customer_id' => $customer->id, 'balance_before' => (int) $customer->balance,
+                    'new_debt' => $newDebt, 'credit_limit' => (int) $customer->credit_limit,
+                ];
+            }
 
             if (! $override && $customer->balance + $newDebt > $customer->credit_limit) {
                 throw new DepotException(
@@ -190,6 +203,10 @@ class SaleService
             'status'          => 'completed',
             'sold_at'         => $data['sold_at'] ?? now(),
         ]);
+
+        if ($limitOverride) {   // le gérant a vendu au-delà de la limite de crédit du client
+            app(AuditService::class)->record($by, 'sale.limit_overridden', $sale, $limitOverride);
+        }
 
         foreach ($prepared as $row) {
             $sale->items()->create($row);

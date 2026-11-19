@@ -3,13 +3,15 @@
 namespace App\Http\Controllers;
 
 use App\Models\Product;
+use App\Services\AuditService;
 use App\Services\StockService;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 
 class StockController extends Controller
 {
-    public function __construct(private StockService $stock)
+    public function __construct(private StockService $stock, private AuditService $audit)
     {
     }
 
@@ -51,7 +53,16 @@ class StockController extends Controller
         $product = Product::findOrFail($data['product_id']);
         $qty = $data['type'] === 'casse' ? -abs($data['bottles']) : $data['bottles'];
 
-        $movement = $this->stock->move($product, $data['type'], $qty, $request->user(), null, $data['note'] ?? null);
+        $movement = DB::transaction(function () use ($request, $data, $product, $qty) {
+            $movement = $this->stock->move($product, $data['type'], $qty, $request->user(), null, $data['note'] ?? null);
+
+            $this->audit->record($request->user(), $data['type'] === 'casse' ? 'stock.breakage' : 'stock.adjusted', $product, [
+                'bottles'     => $qty,
+                'stock_after' => (int) $product->fresh()->stock_bottles,
+            ], $data['note'] ?? null);
+
+            return $movement;
+        });
 
         return response()->json([
             'movement'      => $movement,

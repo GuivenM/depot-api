@@ -10,7 +10,9 @@ use Illuminate\Http\Request;
 
 class ContainerController extends Controller
 {
-    public function __construct(private ContainerService $containers)
+    private const WATCH = ['name', 'deposit_amount', 'active'];
+
+    public function __construct(private ContainerService $containers, private \App\Services\AuditService $audit)
     {
     }
 
@@ -41,16 +43,14 @@ class ContainerController extends Controller
 
     public function store(Request $request)
     {
-        $type = ContainerType::create($this->validated($request));
+        $type = $this->audit->createAudited($request->user(), 'container_type.created', ContainerType::class, $this->validated($request), self::WATCH);
 
-        return response()->json($type->fresh(), 201);
+        return response()->json($type, 201);
     }
 
     public function update(Request $request, ContainerType $containerType)
     {
-        $containerType->update($this->validated($request, partial: true));
-
-        return $containerType->fresh();
+        return $this->audit->updateAudited($request->user(), 'container_type.updated', $containerType, $this->validated($request, partial: true), self::WATCH);
     }
 
     /** Qui nous doit des casiers de ce type. */

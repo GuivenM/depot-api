@@ -16,7 +16,7 @@ use Illuminate\Support\Str;
 class UserService
 {
     /** @return array{0: User, 1: ?string} le compte et le mot de passe provisoire (null si le gérant en a fourni un) */
-    public function create(array $data): array
+    public function create(User $actor, array $data): array
     {
         $generated = empty($data['password']) ? $this->randomPassword() : null;
 
@@ -29,6 +29,8 @@ class UserService
             'active'               => true,
             'must_change_password' => true,
         ])->save();
+
+        app(AuditService::class)->record($actor, 'user.created', $user, ['role' => $data['role'], 'email' => $data['email']]);
 
         return [$user->fresh(), $generated];
     }
@@ -48,7 +50,16 @@ class UserService
                 }
             }
 
-            $user->forceFill(array_intersect_key($data, array_flip(['name', 'email', 'role'])))->save();
+            $watch = ['name', 'email', 'role'];
+            $audit = app(AuditService::class);
+            $before = $audit->snapshot($user, $watch);
+
+            $user->forceFill(array_intersect_key($data, array_flip($watch)))->save();
+
+            $changes = $audit->diff($before, $audit->snapshot($user, $watch), $watch);
+            if ($changes) {
+                $audit->record($actor, 'user.updated', $user, $changes);
+            }
 
             return $user->fresh();
         });
@@ -74,6 +85,7 @@ class UserService
             }
 
             $user->forceFill(['active' => $active])->save();
+            app(AuditService::class)->record($actor, $active ? 'user.activated' : 'user.deactivated', $user);
 
             if (! $active) {
                 $user->tokens()->delete();   // coupe les sessions ouvertes sur tous les appareils
@@ -95,6 +107,7 @@ class UserService
 
             $plain = $this->randomPassword();
             $user->forceFill(['password' => $plain, 'must_change_password' => true])->save();
+            app(AuditService::class)->record($actor, 'user.password_reset', $user);   // jamais le mot de passe
             $user->tokens()->delete();
 
             return [$user->fresh(), $plain];
@@ -114,6 +127,7 @@ class UserService
 
         DB::transaction(function () use ($user, $new, $keepTokenId) {
             $user->forceFill(['password' => $new, 'must_change_password' => false])->save();
+            app(AuditService::class)->record($user, 'user.password_changed', $user);
 
             $tokens = $user->tokens();
             if ($keepTokenId !== null) {

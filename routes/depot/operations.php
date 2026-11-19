@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AuditLogController;
 use App\Http\Controllers\CashController;
 use App\Http\Controllers\ContainerController;
 use App\Http\Controllers\CustomerController;
@@ -127,3 +128,6 @@ Route::middleware(EnsureRole::class.':gerant')->prefix('users')->group(function 
     Route::post('{user}/deactivate', [UserController::class, 'deactivate']);
     Route::post('{user}/reset-password', [UserController::class, 'resetPassword']);
 });
+
+// Journal d'audit (lecture seule)
+Route::middleware(EnsureRole::class.':gerant')->get('audit-logs', [AuditLogController::class, 'index']);

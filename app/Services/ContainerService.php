@@ -141,7 +141,8 @@ class ContainerService
         return DB::transaction(function () use ($by, $customer, $typeId, $delta, $note) {
             $type = ContainerType::lockForUpdate()->findOrFail($typeId);
             $holding = $this->holding($type, 'customer', $customer->id);
-            $after = $holding->quantity + $delta;
+            $before = (int) $holding->quantity;
+            $after = $before + $delta;
 
             if ($after < 0) {
                 throw new DepotException('Cet ajustement rendrait le nombre de casiers dus négatif.');
@@ -149,6 +150,10 @@ class ContainerService
 
             $holding->update(['quantity' => $after]);
             $this->log($by, $type, 'adjustment', 'customer', $customer->id, $delta, 0, $after, null, $note);
+            app(AuditService::class)->record($by, 'container.holding_adjusted', $customer, [
+                'container_type_id' => $type->id, 'container' => $type->name, 'delta' => $delta,
+                'quantity_before' => $before, 'quantity_after' => $after,
+            ], $note);
 
             return $holding->fresh();
         });
@@ -170,8 +175,15 @@ class ContainerService
                 throw new DepotException("Stock de casiers vides insuffisant ({$type->empty_stock} « {$type->name} »).");
             }
 
+            $before = (int) $type->empty_stock;
             $type->increment('empty_stock', $delta);
             $this->log($by, $type, $kind, null, null, 0, $delta, null, null, $note);
+
+            if (in_array($kind, ['loss', 'adjustment'], true)) {   // pertes et corrections des vides du dépôt
+                app(AuditService::class)->record($by, $kind === 'loss' ? 'container.depot_loss' : 'container.depot_adjusted', $type, [
+                    'delta' => $delta, 'empty_stock_before' => $before, 'empty_stock_after' => $before + $delta,
+                ], $note);
+            }
 
             return $type->fresh();
         });

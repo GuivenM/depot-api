@@ -89,6 +89,10 @@ class PurchaseService
                 'void_reason' => $reason,
             ]);
 
+            app(AuditService::class)->record($by, 'purchase.voided', $purchase, [
+                'total' => (int) $purchase->total, 'supplier_id' => $purchase->supplier_id,
+            ], $reason);
+
             return $purchase->load('items');
         });
     }

@@ -50,7 +50,17 @@ class CashService
                 'note'          => $note,
             ]);
 
-            return $s->fresh();
+            $fresh = $s->fresh();
+
+            // Tracé seulement si un écart existe ou si la caisse est clôturée par quelqu'un d'autre que son titulaire.
+            if ((int) $by->id !== (int) $s->user_id || (int) $fresh->difference !== 0) {
+                app(AuditService::class)->record($by, 'cash.closed', $fresh, [
+                    'owner_id' => $s->user_id, 'expected_cash' => (int) $fresh->expected_cash,
+                    'counted_cash' => (int) $fresh->counted_cash, 'difference' => (int) $fresh->difference,
+                ], $note);
+            }
+
+            return $fresh;
         });
     }
 
