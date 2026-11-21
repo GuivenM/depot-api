@@ -1,6 +1,6 @@
 # Système de gestion de dépôt de boissons (SaaS) — Document de suivi
 
-_Mis à jour le 20 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
+_Mis à jour le 21 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
 
 ## 1. Vision
 
@@ -19,7 +19,7 @@ Cible technique : API Laravel + front React (PWA, mobile-first, **hors ligne**),
 | Base centrale | SQLite en local (MySQL en prod possible) : table `tenants` + plus tard abonnements/super-admin |
 | Identification du tenant | En-tête HTTP **`X-Tenant: <id du tenant>`** (middleware `InitializeTenancyByRequestData`) |
 | Front (à faire) | React + Vite, PWA, IndexedDB pour le hors ligne |
-| PDF (à faire) | dompdf |
+| PDF | `barryvdh/laravel-dompdf` (dompdf : PHP pur, fonctionne sur l'hébergement mutualisé), police DejaVu Sans pour les accents. **Dépendance à installer : `composer require barryvdh/laravel-dompdf`** |
 | Paiement (phase 2) | Agrégateur MoMo (FedaPay / KkiaPay) |
 | Hébergement | Mutualisé Namecheap aujourd'hui (bases illimitées), **VPS plus tard** |
 | Monnaie | FCFA, **entiers** (pas de décimales) |
@@ -169,6 +169,13 @@ Auth : `POST login` → token ; ensuite `Authorization: Bearer <token>`.
 | GET | `reports/top-products` | gérant | Produits les plus vendus (`limit`) |
 | GET | `reports/cash-sessions` | gérant | Caisses clôturées, écarts, bilan par vendeur |
 | GET | `reports/stock-alerts` | gérant, magasinier | Produits en rupture ou sous leur seuil |
+| GET | `sales/{id}/receipt.pdf` | gérant ; caissier/vendeur : leurs ventes | Reçu / facture A5 |
+| GET | `customers/{id}/statement.pdf` | gérant, caissier, vendeur | Relevé de compte client (`from`, `to` ; par défaut 90 jours) |
+| GET | `cash/sessions/{id}/report.pdf` | gérant ; caissier/vendeur : leur caisse | Clôture de caisse (ou état en cours) |
+| GET | `reports/activity.pdf` | gérant | Rapport d'activité de la période (`from`, `to`) |
+| GET | `reports/receivables.pdf` | gérant | Créances clients |
+| GET | `reports/stock.pdf` | gérant, magasinier | État du stock valorisé |
+| GET | `reports/sales.csv` | gérant | Export des ventes de la période, une ligne par article |
 | GET | `audit-logs` | gérant | Journal d'audit, du plus récent au plus ancien (50 par page). Filtres : `action` (`user.*` accepté), `user_id`, `subject_type`, `subject_id`, `from` + `to` (`YYYY-MM-DD`, heure du dépôt) |
 | GET/POST | `inventories`, `inventories/{id}` | gérant, magasinier | Lister / ouvrir un inventaire (une ligne par produit actif et par type de casier) / le consulter avec sa progression |
 | POST | `inventories/{id}/counts` | gérant, magasinier | Enregistrer des comptages (`crates` et/ou `bottles`, ou `quantity` pour les casiers) ; recompter remplace |
@@ -242,6 +249,18 @@ Endpoints **en lecture seule** : l'API calcule les totaux (une seule règle de c
 
 **Marge estimée** = CA des lignes dont le produit a un coût connu − quantité × **dernier coût d'achat** (`cost_crate`). Les produits sans coût sont comptés à part (`uncosted_revenue`) pour ne pas fausser la marge. Ce n'est pas une marge comptable (pas de coût moyen pondéré, pas d'historique des coûts).
 
+### Documents imprimables (PDF et CSV)
+Tous passent par `DocumentService` (qui reprend `ReportService` et `CashSession::summary()` : **aucun chiffre calculé autrement que dans l'API**), puis `PdfRenderer` (seul endroit qui connaît dompdf) et des vues Blade dans `resources/views/pdf/` qui ne font que la mise en page. Montants en FCFA avec espaces insécables, dates à l'heure du dépôt (`Fmt`). L'en-tête porte le nom du dépôt (`tenants.name`).
+
+- **Reçu** (A5) : lignes, total, mode de paiement ; pour une vente à crédit, payé à la vente et **reste à payer** ; casiers à rendre ; bandeau « VENTE ANNULÉE » avec la raison si annulée.
+- **Relevé de compte client** : solde d'ouverture, total ajouté, total payé, solde de clôture, détail des mouvements, casiers dus. Si le solde actuel diffère du solde de fin de période, il est affiché à part.
+- **Clôture de caisse** : ventes par mode, calcul détaillé de la caisse théorique (fond + espèces + paiements clients − dépenses − paiements fournisseurs), compté, écart, dépenses, lignes de signature. Une caisse encore ouverte s'imprime en « Caisse en cours ».
+- **Rapport d'activité** : synthèse (ventes par mode, annulées, marge estimée, dépenses, achats), encaissements, journée par journée (jours sans activité omis), meilleurs produits, caisses clôturées et écarts par caissier, situation à ce jour (créances, dettes, stock, casiers), produits à réapprovisionner.
+- **Créances clients** (du plus gros solde au plus petit, dernier paiement, casiers dus, dépassements de limite en rouge) et **état du stock** (valorisé au coût d'achat, produits sans coût signalés, casiers vides).
+- **Export CSV des ventes** : UTF-8 avec BOM et séparateur « ; » (s'ouvre directement dans Excel en français), une ligne par article, ventes annulées marquées. Les cellules de texte commençant par `=`, `+`, `-` ou `@` sont neutralisées (injection de formules).
+
+Les routes exigent le jeton d'authentification dans l'en-tête : **le front doit télécharger le fichier en `fetch` avec les en-têtes, puis l'afficher (Blob / `URL.createObjectURL`) ; un simple lien `<a href>` ne marche pas.**
+
 ### Annulations
 `POST sales/{id}/void` et `POST purchases/{id}/void` (raison obligatoire) rejouent **l'inverse** des mouvements d'origine, dans une transaction :
 
@@ -255,6 +274,7 @@ Endpoints **en lecture seule** : l'API calcule les totaux (une seule règle de c
 ## 7. Commandes utiles
 
 ```bash
+composer require barryvdh/laravel-dompdf         # une fois : bibliothèque PDF (puis déployer le dossier vendor/)
 php artisan migrate                              # base centrale
 php artisan tenants:migrate [--tenants=<id>]     # bases des dépôts (à relancer après chaque nouvelle migration tenant, ex. personnel)
 php artisan depot:provision <tenant> --email=... # prépare + migre + crée le gérant
@@ -278,6 +298,7 @@ php artisan depot:encrypt-credentials            # chiffre les mots de passe de 
 - [x] Personnel : création, modification, désactivation/réactivation, réinitialisation et changement de mot de passe, garde-fous (dernier gérant, caisse ouverte), refus des comptes désactivés même avec token _(patch personnel)_
 - [x] Audit : journal immuable `audit_logs` écrit dans la transaction de l'action (prix, limites, ajustements, casse, annulations, dépassements de limite, inventaires, écarts de caisse, comptes) et endpoint de consultation filtrable _(patch audit)_
 - [x] Sécurité : limitation de débit (login, mot de passe), expiration des tokens, 404 JSON uniforme pour un dépôt inconnu, mot de passe de base chiffré + commande de migration _(patch sécurité)_
+- [x] Documents : reçu, relevé client, clôture de caisse, rapport d'activité, créances, état du stock en PDF ; export CSV des ventes _(patch documents)_
 - [x] Suite de tests d'API (47 tests : isolation entre tenants, stock, ventes/caisse, crédit, consignes) _(patch tests : 47/47 verts à la première exécution, voir §15)_
 
 ## 9. Reste à faire (ordre suggéré)
@@ -288,7 +309,7 @@ php artisan depot:encrypt-credentials            # chiffre les mots de passe de 
 3. **Commandes fournisseurs** : bon de commande avant réception, réceptions partielles, rapprochement avec la facture.
 4. **Compléments consignes** : facturation d'un casier non rendu (conversion en dette d'argent via `deposit_amount`), consigne payée par un client anonyme, bouteilles vendues à l'unité.
 5. **Corrections après clôture** : annulation tardive d'une vente, remboursement client, avoir (écriture dans la caisse courante, sans rouvrir la caisse clôturée).
-6. **Rapports PDF et exports** : bilan jour/semaine/mois, ticket de caisse, facture, export Excel ; comparaison de périodes ; rapport par vendeur ; historique des inventaires.
+6. ~~**Rapports PDF et exports**~~ : reçu, relevé client, clôture de caisse, rapport d'activité, créances, état du stock, export CSV des ventes faits (voir §6 « Documents imprimables »). Reste : export Excel `.xlsx`, feuille d'inventaire PDF, facture avec mentions légales (adresse, téléphone, IFU), comparaison de périodes, rapport par vendeur, historique des inventaires.
 
 **Produit**
 7. **Front React PWA** (mobile-first) : vente rapide au comptoir, caisse, stock, clients, casiers, achats, annulations, inventaire, tableau de bord (consomme `reports/*`).
@@ -321,7 +342,7 @@ php artisan depot:encrypt-credentials            # chiffre les mots de passe de 
 - **Vendeurs et caissiers voient tous les clients** et leurs dettes (pas de cloisonnement par vendeur).
 - **Pas de TVA ni de facturation normalisée.** Seule la logique de caisse est couverte.
 - **Provisioning manuel** : chaque nouveau dépôt demande la création d'une base dans cPanel.
-- **Pas de rapports ni de PDF** pour l'instant ; le dashboard n'existe pas.
+- **Documents** : le rendu PDF n'a pu être vérifié que par l'en-tête du fichier dans les tests, pas visuellement : à contrôler à l'œil sur le premier déploiement (mise en page, accents, coupures de page). En-tête limité au nom du dépôt (pas d'adresse, téléphone ni numéro fiscal : il n'y a pas encore de paramètres du dépôt). Numérotation des reçus basée sur l'identifiant de la vente (`V-000123`), donc propre à chaque dépôt mais non garantie sans trous si une vente est refusée. Un reçu n'est pas une facture fiscale normalisée. Pas de numéro de page total (« Page 1 » seulement). Le dashboard n'existe pas (c'est le rôle du front).
 - **Tests** : la suite passe (§15) mais ne couvre ni la concurrence, ni le provisioning MySQL, ni le hors ligne.
 - **Cache Tenancy désactivé** (mutualisé) : à rétablir avec Redis sur VPS.
 - **Sécurité** : la limite de connexion par dépôt + email + IP n'arrête pas une attaque répartie sur beaucoup d'adresses IP contre un seul compte (un verrouillage de compte serait possible mais permettrait de bloquer un gérant à volonté). Les mots de passe de base sont chiffrés avec `APP_KEY` : quiconque a l'accès au serveur voit aussi `.env`, donc ce chiffrement protège surtout les sauvegardes et les exports de la base centrale. Le nom de base et l'utilisateur MySQL restent en clair.
@@ -345,6 +366,7 @@ php artisan depot:encrypt-credentials            # chiffre les mots de passe de 
 | `Database connection [tenant] not configured` | Tenancy non initialisé (listeners/bootstrappers retirés) | Garder `BootstrapTenancy`, `DatabaseTenancyBootstrapper` |
 | `Unknown database 'laravel'` | Connexion modèle `mysql` sans base | Connexion `tenant_template` sur `information_schema` |
 | `php artisan test` n'affiche **rien** (même pour un seul fichier) | Une classe de test déclare une méthode d'aide qui porte le nom d'une méthode de `TestCase` (ex. `count()`, déjà `public` dans PHPUnit) : erreur fatale au chargement, avalée par l'affichage de `artisan test` | Renommer la méthode (`submitCounts`, `countLines`…). Pour voir l'erreur, lancer `vendor\bin\phpunit <fichier>` |
+| PDF vide ou erreur de police sur le serveur | Dossier `storage/fonts` absent ou non inscriptible (dompdf y met son cache) | Le créer (`storage/fonts/.gitignore` est versionné) avec `chmod 775` |
 | Erreur « table cache introuvable » sur `login` | Le limiteur utilisait le cache `database`, dont la connexion par défaut est devenue celle du dépôt | `RATE_LIMITER_STORE=file` (`config/cache.php`, clé `limiter`) |
 | `auth:sanctum` cherche les tokens dans la mauvaise base | Middleware Tenancy pas prioritaire | `makeTenancyMiddlewareHighestPriority()` |
 
@@ -368,6 +390,7 @@ php artisan depot:encrypt-credentials            # chiffre les mots de passe de 
 - `depot-personnel.patch` : gestion du personnel (`UserService`, `UserController`, `EnsureUserActive`, migration `must_change_password`, `me/password`), `PersonnelTest` (modifie `User`, `AuthController`, `DepotServiceProvider`, `routes/depot.php`, `routes/depot/operations.php`).
 - `depot-audit.patch` : journal d'audit (`AuditService`, `AuditLog`, `AuditLogController`, migration `audit_logs`), branché dans les contrôleurs produits/clients/fournisseurs/casiers/stock et dans `CreditService`, `SupplierService`, `ContainerService`, `SaleService`, `PurchaseService`, `InventoryService`, `CashService`, `UserService` ; `AuditTest`. **À appliquer après `depot-personnel.patch`.**
 - `depot-securite.patch` : limitation de débit, expiration des tokens, 404 uniforme, chiffrement du mot de passe de base (`Tenant`, commande `depot:encrypt-credentials`, `bootstrap/app.php`, `DepotServiceProvider`, `config/cache.php`, `config/sanctum.php`, `config/depot.php`, `phpunit.xml`, `routes/console.php`), `SecurityTest`. **À appliquer après `depot-audit.patch`, puis lancer `php artisan depot:encrypt-credentials`.**
+- `depot-documents.patch` : documents PDF et export CSV (`DocumentService`, `PdfRenderer`, `DocumentController`, `Fmt`, 7 vues `resources/views/pdf/`, routes), `DocumentTest`. **Ne modifie pas `composer.json` : lancer d'abord `composer require barryvdh/laravel-dompdf`. À appliquer après `depot-securite.patch`.**
 - `depot-tests-fix.patch` : correctif des tests (requête « fraîche », base de test copiée).
 - `depot-tests.patch` : suite de tests (`tests/TenantTestCase.php` + 5 fichiers dans `tests/Feature`).
 - `depot-consignes.patch` : types de casiers, vides du dépôt, casiers dus par client, intégration à la vente (modifie `SaleService`, `SaleController`, `Product`, `ProductController`, `routes/depot/operations.php`).
@@ -394,6 +417,7 @@ php artisan test --filter=SalesTest
 | `VoidTest` | annulation de vente (cash, crédit + acompte, casiers), d'achat (stock, dette, règlement cash, casiers) ; refus et retour arrière complet (déjà vendu, déjà remboursé, déjà rendu, caisse clôturée), double annulation, rôles |
 | `PurchaseTest` | réception (stock, dette, dernier coût), idempotence, paiement à l'achat réservé au gérant, cash qui sort du tiroir, règlements (idempotents, plafonnés), casiers dus à la brasserie, rollback complet, rôles, isolation |
 | `PersonnelTest` | droits (gérant seul), création avec mot de passe provisoire ou fourni, email unique (casse ignorée) et rôle valide, filtres, modification, pas de changement de son propre rôle, refus avec caisse ouverte, désactivation (tokens coupés, connexion refusée, réactivation), compte désactivé refusé même avec token, réinitialisation, changement de mot de passe (autres appareils déconnectés), isolation |
+| `DocumentTest` | reçu (comptant, crédit partiellement payé, annulé, casiers à rendre), droits d'accès (vendeur : ses ventes et sa caisse seulement), relevé client (solde d'ouverture et de clôture, période vide), rapport d'activité, clôture de caisse (théorique, écart, dépenses), caisse en cours, créances (tri, dépassement, dernier paiement), état du stock valorisé, export CSV (BOM, séparateur, annulées, neutralisation des formules), formatage des montants, isolation entre dépôts ; chaque PDF est vérifié par son en-tête `%PDF` |
 | `SecurityTest` | 404 identique pour un `X-Tenant` absent ou inconnu, limite de login (par dépôt + email + IP, puis par IP seule), 429 avec `Retry-After`, comptes et dépôts voisins épargnés, limite du changement de mot de passe, token expiré refusé, mot de passe de base chiffré au repos et lisible par l'application, mot de passe en clair existant lisible puis chiffré par la commande (idempotente) |
 | `AuditTest` | traces des prix/limites/consignes, absence de trace sans changement réel ou si l'action est refusée, abandon de créance et dette fournisseur (avant/après), casse et ajustements, vides et casiers dus, dépassement de limite seulement quand il a lieu, annulations avec raison, inventaire, clôture de caisse (écart ou tiers), comptes sans aucun mot de passe, immuabilité, droits, filtres (action, utilisateur, sujet, période), isolation |
 | `ContainerTest` | 10 vendus / 8 rendus → 2 dus, client anonyme équilibré, retours, rollback, produits non consignés, rôles |

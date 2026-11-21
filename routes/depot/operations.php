@@ -4,6 +4,7 @@ use App\Http\Controllers\AuditLogController;
 use App\Http\Controllers\CashController;
 use App\Http\Controllers\ContainerController;
 use App\Http\Controllers\CustomerController;
+use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\InventoryController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\PurchaseController;
@@ -131,3 +132,16 @@ Route::middleware(EnsureRole::class.':gerant')->prefix('users')->group(function 
 
 // Journal d'audit (lecture seule)
 Route::middleware(EnsureRole::class.':gerant')->get('audit-logs', [AuditLogController::class, 'index']);
+
+// Documents imprimables : le gérant a tout, les autres seulement leurs propres reçus et caisses
+Route::middleware(EnsureRole::class.':gerant,caissier,vendeur')->group(function () {
+    Route::get('sales/{sale}/receipt.pdf', [DocumentController::class, 'receipt']);
+    Route::get('customers/{customer}/statement.pdf', [DocumentController::class, 'statement']);
+    Route::get('cash/sessions/{session}/report.pdf', [DocumentController::class, 'cashClosing']);
+});
+Route::middleware(EnsureRole::class.':gerant')->prefix('reports')->group(function () {
+    Route::get('activity.pdf', [DocumentController::class, 'activity']);
+    Route::get('receivables.pdf', [DocumentController::class, 'receivables']);
+    Route::get('sales.csv', [DocumentController::class, 'salesCsv']);
+});
+Route::middleware(EnsureRole::class.':gerant,magasinier')->get('reports/stock.pdf', [DocumentController::class, 'stock']);
