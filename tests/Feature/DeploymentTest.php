@@ -157,6 +157,30 @@ class DeploymentTest extends TenantTestCase
         $this->assertNull(Tenant::find('sans-base'));
     }
 
+    // ---------------------------------------------------------------- moteur de stockage
+
+    public function test_les_connexions_mysql_imposent_innodb(): void
+    {
+        // Sans cela, un serveur dont le moteur par défaut est MyISAM crée des tables sans transactions
+        // (et échoue sur les index trop longs : « max key length is 1000 bytes »).
+        foreach (['mysql', 'mariadb', 'tenant_template'] as $connection) {
+            $this->assertSame('InnoDB', config("database.connections.{$connection}.engine"), $connection);
+        }
+    }
+
+    public function test_le_moteur_du_modele_est_repris_par_la_connexion_de_chaque_depot(): void
+    {
+        $tenant = Tenant::create(['id' => 'chez-moteur', 'name' => 'Moteur', 'status' => 'pending_db', 'tenancy_db_name' => 'compte_moteur']);
+        config(['tenancy.database.template_tenant_connection' => 'tenant_template']);
+
+        $this->assertSame('InnoDB', $tenant->database()->connection()['engine']);
+    }
+
+    public function test_la_detection_des_tables_hors_innodb_ne_gene_pas_les_bases_sqlite(): void
+    {
+        $this->assertSame([], \App\Console\Commands\CheckEnvironment::nonInnoDbTables());
+    }
+
     // ---------------------------------------------------------------- contrôle de l'installation
 
     public function test_le_controle_ne_bloque_pas_en_environnement_de_test(): void

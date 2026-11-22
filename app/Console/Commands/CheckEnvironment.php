@@ -202,13 +202,33 @@ class CheckEnvironment extends Command
         }
     }
 
+    /** Tables qui ne sont pas en InnoDB (MySQL/MariaDB seulement) : sans InnoDB, pas de transactions ni de clés étrangères. */
+    public static function nonInnoDbTables(): array
+    {
+        if (! in_array(DB::getDriverName(), ['mysql', 'mariadb'], true)) {
+            return [];
+        }
+
+        return array_map(
+            fn ($row) => (string) ($row->table_name ?? $row->TABLE_NAME),
+            DB::select("select table_name from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and engine <> 'InnoDB'")
+        );
+    }
+
     private function checkCentralDatabase(): void
     {
         try {
             DB::connection()->getPdo();
-            Schema::hasTable('tenants')
+            if (! Schema::hasTable('tenants')) {
+                $this->problem('Base centrale sans table « tenants »', 'php artisan migrate --force');
+
+                return;
+            }
+
+            $myisam = self::nonInnoDbTables();
+            $myisam === []
                 ? $this->ok('Base centrale', 'table des dépôts présente')
-                : $this->problem('Base centrale sans table « tenants »', 'php artisan migrate --force');
+                : $this->problem('Base centrale : tables hors InnoDB', implode(', ', $myisam).' (transactions impossibles, voir DEPLOIEMENT.md)');
         } catch (Throwable $e) {
             $this->problem('Base centrale inaccessible', $e->getMessage());
         }
@@ -307,6 +327,7 @@ class CheckEnvironment extends Command
 
                     return [
                         'missing'  => $missing,
+                        'myisam'   => self::nonInnoDbTables(),
                         'managers' => $missing ? 0 : (int) DB::table('users')->where('role', 'gerant')->where('active', true)->count(),
                     ];
                 });
@@ -315,7 +336,9 @@ class CheckEnvironment extends Command
                 continue;
             }
 
-            if ($report['missing']) {
+            if ($report['myisam']) {
+                $this->problem("{$id} : tables hors InnoDB", implode(', ', $report['myisam']).' : sans InnoDB les ventes ne sont pas protégées par des transactions. Base neuve : php artisan tenants:migrate-fresh --tenants='.$id.' (efface tout) ; sinon voir DEPLOIEMENT.md');
+            } elseif ($report['missing']) {
                 $this->problem("{$id} : tables manquantes", implode(', ', $report['missing']).' → php artisan tenants:migrate --tenants='.$id);
             } elseif ($report['managers'] === 0) {
                 $this->warn_("{$id} : aucun gérant actif", 'personne ne peut administrer ce dépôt');
