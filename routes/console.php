@@ -13,3 +13,7 @@ Schedule::command('tenants:run sanctum:prune-expired --option="hours=24"')->dail
 
 // Sauvegarde quotidienne de toutes les bases (nécessite le cron `php artisan schedule:run`) ; code de sortie ≠ 0 si un échec.
 Schedule::command('depot:backup')->dailyAt('02:00');
+
+// Témoin de vie : `depot:check` le lit pour vérifier que le cron `schedule:run` tourne bien (toutes les 5 minutes chez Namecheap).
+Schedule::call(fn () => file_put_contents(storage_path('framework/schedule-heartbeat'), now()->toIso8601String()))
+    ->everyFiveMinutes()->name('heartbeat');

@@ -1,6 +1,6 @@
 # Système de gestion de dépôt de boissons (SaaS) — Document de suivi
 
-_Mis à jour le 22 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
+_Mis à jour le 23 novembre 2026. À garder à la racine du dépôt (`docs/PROJET.md`) et à tenir à jour._
 
 ## 1. Vision
 
@@ -72,7 +72,7 @@ Interface `TenantDatabaseProvisioner`, deux implémentations, choisies par `TENA
 
 Onboarding d'un client (mode manuel) :
 1. Créer la base **vide** et l'utilisateur MySQL (tous droits sur cette base) dans cPanel.
-2. Créer le tenant (ci-dessus, id = code d'entreprise).
+2. Créer le tenant : `php artisan depot:tenant:create <code> --name="..." --db=<base> --db-user=<utilisateur>` (le mot de passe MySQL est demandé au clavier ; pas besoin de `tinker`, absent en production).
 3. `php artisan depot:provision <tenant> --email=gerant@... --name="Nom"` → vérifie la connexion, migre, crée le gérant (mot de passe initial affiché une seule fois), passe le statut à `active`.
 
 Statuts : `pending_db` → `provisioning` → `active` (ou `failed`, `suspended`). Un tenant non `active` reçoit un 403.
@@ -192,7 +192,7 @@ Le gérant gère les comptes ; **aucun compte n'est jamais supprimé** (il est r
 
 ### Sécurité
 - **Limitation de débit** (réponse 429 en JSON avec `Retry-After`) : `login` est limité à **5 tentatives/minute par dépôt + email + IP** et **30/minute par IP** (tous emails confondus) ; `me/password` à **5/minute par utilisateur**. Réglable par `DEPOT_LOGIN_ATTEMPTS`, `DEPOT_LOGIN_ATTEMPTS_IP`, `DEPOT_PASSWORD_ATTEMPTS`. Les compteurs vivent dans le cache `file` (`RATE_LIMITER_STORE`).
-- **Expiration des tokens** : 7 jours par défaut (`SANCTUM_EXPIRATION`, en minutes ; `0` = jamais). `login` renvoie `expires_at` ; passé ce délai l'API répond 401 et le front redemande le mot de passe. Les ventes faites hors ligne gardent leur `uuid` : elles se synchronisent après la reconnexion. Nettoyage quotidien des tokens expirés (`sanctum:prune-expired`) planifié pour chaque dépôt : il demande le cron `php artisan schedule:run` ; sans lui, les tokens expirés restent refusés mais s'accumulent.
+- **Expiration des tokens** : 7 jours par défaut (`SANCTUM_EXPIRATION`, en minutes ; `0` = jamais). `login` renvoie `expires_at` ; passé ce délai l'API répond 401 et le front redemande le mot de passe. Les ventes faites hors ligne gardent leur `uuid` : elles se synchronisent après la reconnexion. Nettoyage quotidien des tokens expirés (`sanctum:prune-expired`) planifié pour chaque dépôt : il demande le cron `php artisan schedule:run` (toutes les 5 minutes, voir `DEPLOIEMENT.md`) ; sans lui, les tokens expirés restent refusés mais s'accumulent.
 - **Dépôt inconnu ou `X-Tenant` absent** : 404 JSON, **même message** dans les deux cas (on ne révèle pas quels dépôts existent).
 - **Mot de passe de la base d'un dépôt chiffré** dans `tenants.data` (cast `encrypted` de Laravel, clé = `APP_KEY`). Le nom de base et l'utilisateur restent en clair. Un mot de passe encore en clair reste lisible (il n'y a pas de coupure de service) ; `php artisan depot:encrypt-credentials` le chiffre définitivement (idempotent, à lancer une fois après la mise à jour). ⚠️ **Sauvegarder `APP_KEY` hors du serveur** : sans elle, les mots de passe des bases sont perdus.
 
@@ -250,7 +250,7 @@ Endpoints **en lecture seule** : l'API calcule les totaux (une seule règle de c
 **Marge estimée** = CA des lignes dont le produit a un coût connu − quantité × **dernier coût d'achat** (`cost_crate`). Les produits sans coût sont comptés à part (`uncosted_revenue`) pour ne pas fausser la marge. Ce n'est pas une marge comptable (pas de coût moyen pondéré, pas d'historique des coûts).
 
 ### Sauvegardes
-`php artisan depot:backup` sauvegarde **chaque dépôt puis la base centrale** (qui contient la liste des dépôts et leurs accès : sans elle, les bases des dépôts ne servent à rien). Planifié chaque jour à 02:00 (`routes/console.php`) : il faut donc le cron `php artisan schedule:run` chaque minute.
+`php artisan depot:backup` sauvegarde **chaque dépôt puis la base centrale** (qui contient la liste des dépôts et leurs accès : sans elle, les bases des dépôts ne servent à rien). Planifié chaque jour à 02:00 (`routes/console.php`) : il faut donc le cron `php artisan schedule:run` **toutes les 5 minutes** (Namecheap interdit les tâches plus fréquentes ; 02:00 tombe bien sur un passage).
 
 - **Fichiers** : `storage/app/backups/{dépôt}/{dépôt}_{AAAAMMJJ}_{HHMMSS}.sql.gz` (heure UTC), mode 0640. Un fichier n'a son nom définitif qu'**après avoir été relu entièrement et vérifié** (intégrité gzip, fin de dump MySQL présente) : jamais de sauvegarde à moitié écrite. Le dossier est hors du dossier public ; ne jamais le placer dedans.
 - **MySQL** : `mysqldump --single-transaction` (sans verrouiller les ventes en cours), `--no-tablespaces` (évite l'erreur de privilège sur l'hébergement mutualisé). **Le mot de passe ne passe jamais dans la ligne de commande** (variable d'environnement du processus). Si `mysqldump` n'est pas dans le PATH, renseigner `MYSQLDUMP_PATH`. SQLite (central en développement, tests) : copie compressée du fichier.
@@ -292,12 +292,15 @@ php artisan tenants:migrate [--tenants=<id>]     # bases des dépôts (à relanc
 php artisan depot:provision <tenant> --email=... # prépare + migre + crée le gérant
 php artisan depot:demo <tenant>                  # 3 produits de démo avec stock
 php artisan depot:encrypt-credentials            # chiffre les mots de passe de base encore en clair (une fois, après mise à jour)
+php artisan depot:tenant:create <code> --db=... --db-user=...   # enregistre un nouveau dépôt (avant depot:provision)
+php artisan depot:check [--tenants]              # contrôle de l'installation (PHP, droits, .env, base, cron, sauvegardes, dépôts)
+./scripts/deploy.sh                              # mise à jour sur le serveur (maintenance, sauvegarde, migrations, contrôle)
 php artisan depot:backup [--tenant=<id>]         # sauvegarde les bases (tous les jours à 02:00 via le cron schedule:run)
 php artisan depot:backup:status                  # code 1 si une base n'a pas de sauvegarde récente
 php artisan depot:restore <tenant> <fichier> --force   # restaure un dépôt (sauvegarde de sécurité faite avant)
 ```
 
-Cron à créer chez l'hébergeur, **une seule ligne, chaque minute** : `* * * * * cd /chemin/du/projet && php artisan schedule:run >> /dev/null 2>&1`
+Cron à créer chez l'hébergeur, **une seule ligne, toutes les 5 minutes** (limite Namecheap), avec le **chemin complet de PHP** : `*/5 * * * * /opt/alt/php83/usr/bin/php /home/COMPTE/depot-api/artisan schedule:run >> /dev/null 2>&1`
 
 ## 8. Fait
 
@@ -317,6 +320,7 @@ Cron à créer chez l'hébergeur, **une seule ligne, chaque minute** : `* * * * 
 - [x] Sécurité : limitation de débit (login, mot de passe), expiration des tokens, 404 JSON uniforme pour un dépôt inconnu, mot de passe de base chiffré + commande de migration _(patch sécurité)_
 - [x] Documents : reçu, relevé client, clôture de caisse, rapport d'activité, créances, état du stock en PDF ; export CSV des ventes _(patch documents)_
 - [x] Sauvegardes : `depot:backup` quotidien de chaque dépôt et de la base centrale (vérifiées, rétention 14 jours + 6 mois, copie hors serveur optionnelle), contrôle `depot:backup:status`, restauration `depot:restore` _(patch sauvegardes)_
+- [x] Déploiement : guide pas à pas Namecheap (`DEPLOIEMENT.md`), script `scripts/deploy.sh`, modèle `.env.production.example`, `depot:tenant:create`, `depot:check`, CORS restreint, en-têtes de sécurité (HSTS, nosniff...) _(patch déploiement)_
 - [x] Suite de tests d'API (47 tests : isolation entre tenants, stock, ventes/caisse, crédit, consignes) _(patch tests : 47/47 verts à la première exécution, voir §15)_
 
 ## 9. Reste à faire (ordre suggéré)
@@ -339,7 +343,7 @@ Cron à créer chez l'hébergeur, **une seule ligne, chaque minute** : `* * * * 
 11. **Compléter les tests** : concurrence (deux ventes simultanées), `ManualProvisioner` / `depot:provision` (nécessitent MySQL), hors ligne, et un test d'isolation à chaque nouvel endpoint. Brancher la suite en CI.
 12. ~~**Sauvegardes**~~ : fait (voir §6 « Sauvegardes »). Reste : chiffrement des fichiers avant l'envoi hors serveur, export à la demande d'un dépôt pour son client, alerte automatique par email en cas d'échec.
 13. **Suivi des migrations** par tenant (échecs isolés) et exécution par lots.
-14. **Sécurité** : ~~limitation de débit sur `login`, expiration des tokens, chiffrement des identifiants de base, 404 JSON pour un tenant inconnu~~ fait (§6 « Sécurité »). Reste : en-têtes CORS/HTTPS stricts, limitation de débit avant l'identification du dépôt (requêtes sur des dépôts inconnus), verrouillage d'un compte après trop d'échecs répartis sur plusieurs IP.
+14. **Sécurité** : ~~limitation de débit sur `login`, expiration des tokens, chiffrement des identifiants de base, 404 JSON pour un tenant inconnu, CORS et en-têtes HTTPS~~ fait (§6 « Sécurité », `DEPLOIEMENT.md`). Reste : limitation de débit avant l'identification du dépôt (requêtes sur des dépôts inconnus), verrouillage d'un compte après trop d'échecs répartis sur plusieurs IP.
 15. **Migration vers VPS** (voir §11) ; vérifier la performance des rapports sur de gros volumes (index, éventuellement tables d'agrégats).
 
 ## 10. Limites connues
@@ -361,6 +365,7 @@ Cron à créer chez l'hébergeur, **une seule ligne, chaque minute** : `* * * * 
 - **Pas de TVA ni de facturation normalisée.** Seule la logique de caisse est couverte.
 - **Provisioning manuel** : chaque nouveau dépôt demande la création d'une base dans cPanel.
 - **Sauvegardes** : seul le chemin SQLite est exécuté par les tests ; les commandes `mysqldump` / `mysql` sont vérifiées (arguments, absence de mot de passe) mais **pas exécutées contre un vrai serveur MySQL** : à essayer une fois sur le serveur (sauvegarde puis restauration d'un dépôt de test). Les fichiers ne sont pas chiffrés (stocker sur un disque distant chiffré, accès restreint : ils contiennent toutes les données du dépôt, y compris les mots de passe hachés des comptes). Sans copie hors serveur, une panne ou une suppression du compte d'hébergement emporte aussi les sauvegardes. La sauvegarde SQLite centrale est une copie de fichier : à faire de préférence hors des heures d'activité (la base centrale ne change que lors de la création ou de la suspension d'un dépôt). Pas d'alerte automatique : c'est `depot:backup:status` qu'il faut surveiller. Une restauration remet aussi les comptes et les tokens tels qu'ils étaient (les sessions ouvertes depuis peuvent être invalides).
+- **Déploiement** : le guide `DEPLOIEMENT.md` s'appuie sur la documentation Namecheap (SSH sur le port 21098, cron limité à 5 minutes, liste par défaut des fonctions désactivées, installation de Composer) **sans avoir été déroulé sur un vrai compte** : le chemin du binaire PHP, les extensions disponibles et `proc_open` se vérifient avec `depot:check`. PHP local = 8.5, hébergement = 8.3 ou 8.4 : si `composer install` se plaint de la version de PHP, fixer `composer config platform.php 8.3.0` en local puis `composer update` avant de déployer. `scripts/deploy.sh` est testé avec un faux PHP (ordre des étapes, arrêt et site laissé en maintenance en cas d'échec), pas contre un serveur. CORS : aucune origine autorisée par défaut, donc le front doit être listé dans `CORS_ALLOWED_ORIGINS`. Pas de déploiement automatique à chaque `git push` (volontairement : une mise à jour passe par `deploy.sh`, avec sauvegarde). Derrière un proxy (Cloudflare en mode « Flexible »), `isSecure()` est faux et HSTS n'est pas envoyé : configurer les proxys de confiance.
 - **Documents** : le rendu PDF n'a pu être vérifié que par l'en-tête du fichier dans les tests, pas visuellement : à contrôler à l'œil sur le premier déploiement (mise en page, accents, coupures de page). En-tête limité au nom du dépôt (pas d'adresse, téléphone ni numéro fiscal : il n'y a pas encore de paramètres du dépôt). Numérotation des reçus basée sur l'identifiant de la vente (`V-000123`), donc propre à chaque dépôt mais non garantie sans trous si une vente est refusée. Un reçu n'est pas une facture fiscale normalisée. Pas de numéro de page total (« Page 1 » seulement). Le dashboard n'existe pas (c'est le rôle du front).
 - **Tests** : la suite passe (§15) mais ne couvre ni la concurrence, ni le provisioning MySQL, ni le hors ligne.
 - **Cache Tenancy désactivé** (mutualisé) : à rétablir avec Redis sur VPS.
@@ -393,7 +398,7 @@ Cron à créer chez l'hébergeur, **une seule ligne, chaque minute** : `* * * * 
 
 - PHP 8.5 en local ; **vérifier la version PHP du forfait Namecheap** avant déploiement.
 - Base centrale SQLite ; MySQL local pour les bases des dépôts (Laragon/XAMPP).
-- Variables `.env` propres à ce projet : `DB_CONNECTION=sqlite`, `TENANT_DB_HOST/PORT/USERNAME/PASSWORD`, `TENANT_PROVISIONER=manual`, `RATE_LIMITER_STORE=file`, `BACKUP_PATH`, `BACKUP_KEEP`, `BACKUP_MONTHS`, `MYSQLDUMP_PATH`, `MYSQL_CLIENT_PATH`, `BACKUP_REMOTE_DISK`, `BACKUP_REMOTE_PATH`, `SANCTUM_EXPIRATION`, `DEPOT_LOGIN_ATTEMPTS`, `DEPOT_LOGIN_ATTEMPTS_IP`, `DEPOT_PASSWORD_ATTEMPTS`. `phpunit.xml` règle les limites très haut pour que la suite ne se bloque pas elle-même.
+- Variables `.env` propres à ce projet : `DB_CONNECTION=sqlite`, `TENANT_DB_HOST/PORT/USERNAME/PASSWORD`, `TENANT_PROVISIONER=manual`, `RATE_LIMITER_STORE=file`, `CORS_ALLOWED_ORIGINS`, `BACKUP_PATH`, `BACKUP_KEEP`, `BACKUP_MONTHS`, `MYSQLDUMP_PATH`, `MYSQL_CLIENT_PATH`, `BACKUP_REMOTE_DISK`, `BACKUP_REMOTE_PATH`, `SANCTUM_EXPIRATION`, `DEPOT_LOGIN_ATTEMPTS`, `DEPOT_LOGIN_ATTEMPTS_IP`, `DEPOT_PASSWORD_ATTEMPTS`. `phpunit.xml` règle les limites très haut pour que la suite ne se bloque pas elle-même.
 
 ## 14. Livrables déjà produits
 
@@ -409,6 +414,7 @@ Cron à créer chez l'hébergeur, **une seule ligne, chaque minute** : `* * * * 
 - `depot-personnel.patch` : gestion du personnel (`UserService`, `UserController`, `EnsureUserActive`, migration `must_change_password`, `me/password`), `PersonnelTest` (modifie `User`, `AuthController`, `DepotServiceProvider`, `routes/depot.php`, `routes/depot/operations.php`).
 - `depot-audit.patch` : journal d'audit (`AuditService`, `AuditLog`, `AuditLogController`, migration `audit_logs`), branché dans les contrôleurs produits/clients/fournisseurs/casiers/stock et dans `CreditService`, `SupplierService`, `ContainerService`, `SaleService`, `PurchaseService`, `InventoryService`, `CashService`, `UserService` ; `AuditTest`. **À appliquer après `depot-personnel.patch`.**
 - `depot-securite.patch` : limitation de débit, expiration des tokens, 404 uniforme, chiffrement du mot de passe de base (`Tenant`, commande `depot:encrypt-credentials`, `bootstrap/app.php`, `DepotServiceProvider`, `config/cache.php`, `config/sanctum.php`, `config/depot.php`, `phpunit.xml`, `routes/console.php`), `SecurityTest`. **À appliquer après `depot-audit.patch`, puis lancer `php artisan depot:encrypt-credentials`.**
+- `depot-deploiement.patch` : `DEPLOIEMENT.md`, `scripts/deploy.sh`, `.env.production.example`, `depot:tenant:create`, `depot:check`, `config/cors.php`, `SecurityHeaders`, témoin de vie du planificateur, `DeploymentTest`. **À appliquer après `depot-sauvegardes.patch` ; aucune nouvelle dépendance.**
 - `depot-sauvegardes.patch` : sauvegardes (`BackupService`, commandes `depot:backup`, `depot:backup:status`, `depot:restore`, planification, config `depot.backup`), `BackupTest`. **À appliquer après `depot-documents.patch` ; aucune nouvelle dépendance.**
 - `depot-documents.patch` : documents PDF et export CSV (`DocumentService`, `PdfRenderer`, `DocumentController`, `Fmt`, 7 vues `resources/views/pdf/`, routes), `DocumentTest`. **Ne modifie pas `composer.json` : lancer d'abord `composer require barryvdh/laravel-dompdf`. À appliquer après `depot-securite.patch`.**
 - `depot-tests-fix.patch` : correctif des tests (requête « fraîche », base de test copiée).
@@ -437,6 +443,7 @@ php artisan test --filter=SalesTest
 | `VoidTest` | annulation de vente (cash, crédit + acompte, casiers), d'achat (stock, dette, règlement cash, casiers) ; refus et retour arrière complet (déjà vendu, déjà remboursé, déjà rendu, caisse clôturée), double annulation, rôles |
 | `PurchaseTest` | réception (stock, dette, dernier coût), idempotence, paiement à l'achat réservé au gérant, cash qui sort du tiroir, règlements (idempotents, plafonnés), casiers dus à la brasserie, rollback complet, rôles, isolation |
 | `PersonnelTest` | droits (gérant seul), création avec mot de passe provisoire ou fourni, email unique (casse ignorée) et rôle valide, filtres, modification, pas de changement de son propre rôle, refus avec caisse ouverte, désactivation (tokens coupés, connexion refusée, réactivation), compte désactivé refusé même avec token, réinitialisation, changement de mot de passe (autres appareils déconnectés), isolation |
+| `DeploymentTest` | CORS (aucun site par défaut, seulement les sites listés, en-têtes lisibles par le front), en-têtes de sécurité (HSTS seulement en https), création d'un dépôt (mot de passe chiffré, saisie au clavier, codes invalides/réservés/déjà pris, mode manuel), `depot:check` (aucun blocage en test, refus de `APP_DEBUG` et de CORS `*` en production, fuseau UTC, limiteur en base, témoin de vie, base de dépôt non migrée sans bloquer les autres), planification |
 | `BackupTest` | fichier gzip contenant une vraie base avec les données, une sauvegarde par dépôt sans mélange, échec isolé (les autres dépôts sont sauvegardés, code 1, aucun fichier partiel), dépôts sans base ignorés et dépôt inconnu refusé, détection des fichiers tronqués ou corrompus, sélection de rétention (récentes + premier de chaque mois), sauvegardes de sécurité épargnées, `--no-prune`, contrôle d'âge, restauration (refus sans `--force`, état d'origine retrouvé, sauvegarde de sécurité, fichier corrompu refusé sans toucher à la base), copie hors serveur et nettoyage distant, disque distant en panne, commandes MySQL sans mot de passe en argument |
 | `DocumentTest` | reçu (comptant, crédit partiellement payé, annulé, casiers à rendre), droits d'accès (vendeur : ses ventes et sa caisse seulement), relevé client (solde d'ouverture et de clôture, période vide), rapport d'activité, clôture de caisse (théorique, écart, dépenses), caisse en cours, créances (tri, dépassement, dernier paiement), état du stock valorisé, export CSV (BOM, séparateur, annulées, neutralisation des formules), formatage des montants, isolation entre dépôts ; chaque PDF est vérifié par son en-tête `%PDF` |
 | `SecurityTest` | 404 identique pour un `X-Tenant` absent ou inconnu, limite de login (par dépôt + email + IP, puis par IP seule), 429 avec `Retry-After`, comptes et dépôts voisins épargnés, limite du changement de mot de passe, token expiré refusé, mot de passe de base chiffré au repos et lisible par l'application, mot de passe en clair existant lisible puis chiffré par la commande (idempotente) |
