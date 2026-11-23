@@ -106,26 +106,17 @@ curl -i -X POST https://api.mondomaine.com/api/v1/login -H "X-Tenant: nimporte" 
    Le code `chez-paul` est ce que le front enverra dans l'en-tête `X-Tenant` : minuscules, chiffres et tirets.
 3. Préparer la base, la migrer, créer le gérant :
    ```bash
-   php artisan depot:provision chez-paul --email=paul@exemple.com --name="Paul"
+   php artisan depot:provision chez-oka --email=guivenpambou@gmail.com --name="Guiven"
    ```
    Le **mot de passe initial du gérant s'affiche une seule fois** : le lui transmettre (il devra le changer).
 4. Contrôler : `php artisan depot:check --tenants`.
-
-> **Si l'étape 3 échoue avec `1071 Specified key was too long; max key length is 1000 bytes`** : le serveur MySQL crée par défaut des tables en **MyISAM** (limite de 1000 octets par index), un moteur sans transactions que l'application ne peut pas utiliser. Depuis la mise à jour qui impose **InnoDB** (`config/database.php`), cela n'arrive plus ; mais les tables déjà créées par l'essai raté restent en MyISAM et doivent être supprimées :
-> ```bash
-> git pull && php artisan optimize:clear               # récupérer la correction, vider la configuration en cache
-> php artisan tenants:migrate-fresh --tenants=chez-paul  # ⚠ supprime TOUTES les tables de ce dépôt, sans confirmation
-> php artisan depot:provision chez-paul --email=paul@exemple.com --name="Paul"
-> ```
-> ⚠ **Indiquez toujours `--tenants=<le dépôt>`** : sans cette option, la commande efface les bases de **tous** les dépôts. Elle n'est acceptable ici que parce que cette base vient d'être créée et est vide ; sur un dépôt qui contient des données, ne l'utilisez jamais (restaurez une sauvegarde à la place). Autre méthode, sans risque d'erreur de dépôt : cPanel → phpMyAdmin → la base du dépôt → tout cocher → *Supprimer*.
-> Vérifiez ensuite avec `php artisan depot:check --tenants` (il signale désormais toute table hors InnoDB).
 
 ## 8. Les tâches planifiées (cron)
 
 Namecheap **n'autorise pas** les tâches plus fréquentes que **toutes les 5 minutes**. cPanel → **Cron Jobs** → une seule ligne :
 
 ```
-*/5 * * * * /opt/alt/php83/usr/bin/php /home/VOTRE_COMPTE/depot-api/artisan schedule:run >> /dev/null 2>&1
+*/5 * * * * /opt/alt/php83/usr/bin/php /home/avdcyenp/depot-api/artisan schedule:run >> /dev/null 2>&1
 ```
 
 Elle déclenche : la **sauvegarde de toutes les bases à 02:00 UTC**, le nettoyage quotidien des tokens expirés, et un témoin de vie que `depot:check` lit
@@ -201,5 +192,4 @@ Pour la base centrale : `gunzip -c storage/app/backups/central/central_AAAAMMJJ_
 | Une modification de `.env` sans effet | Configuration en cache | `php artisan config:clear` (ou `optimize` après) |
 | Le cron ne tourne pas | Chemin de PHP, intervalle < 5 min | Chemin complet du binaire ; `*/5` ; cPanel → Cron Jobs → vérifier l'email d'erreur |
 | `Class "Barryvdh\DomPDF..." not found` | `composer install` non lancé | `php composer.phar install --no-dev --optimize-autoloader` |
-| Migration : `1071 Specified key was too long; max key length is 1000 bytes` | Tables créées en MyISAM par défaut | Voir l'encadré de l'étape 7 (InnoDB imposé, puis `tenants:migrate-fresh --tenants=...` sur une base neuve) |
 | `composer install` : « lock file ... PHP » | `composer.lock` résolu pour PHP 8.5 | Voir l'étape 2 (`composer config platform.php 8.3.0` puis `composer update`, en local) |

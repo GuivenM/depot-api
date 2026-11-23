@@ -290,7 +290,8 @@ composer require barryvdh/laravel-dompdf         # une fois : bibliothèque PDF 
 php artisan migrate                              # base centrale
 php artisan tenants:migrate [--tenants=<id>]     # bases des dépôts (à relancer après chaque nouvelle migration tenant, ex. personnel)
 php artisan depot:provision <tenant> --email=... # prépare + migre + crée le gérant
-php artisan depot:demo <tenant>                  # 3 produits de démo avec stock
+php artisan depot:demo <tenant> [--full] [--users]   # données de TEST : 3 produits, ou jeu complet (--full) ; comptes de test (--users). Refuse tout dépôt qui a déjà des produits
+# Scénario de test manuel de bout en bout : SCENARIO-DE-TEST.md
 php artisan depot:encrypt-credentials            # chiffre les mots de passe de base encore en clair (une fois, après mise à jour)
 php artisan depot:tenant:create <code> --db=... --db-user=...   # enregistre un nouveau dépôt (avant depot:provision)
 php artisan depot:check [--tenants]              # contrôle de l'installation (PHP, droits, .env, base, cron, sauvegardes, dépôts)

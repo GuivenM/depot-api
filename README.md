@@ -67,14 +67,8 @@ php artisan serve            # http://localhost:8000
 2. **Déclarer le dépôt** :
 
 ```bash
-php artisan tinker
->>> App\Models\Tenant::create([
-...   'id' => 'chez-paul',                    // code d'entreprise = valeur de X-Tenant
-...   'name' => 'Dépôt Chez Paul',
-...   'tenancy_db_name' => 'compte_chezpaul',
-...   'tenancy_db_username' => 'compte_paul',
-...   'tenancy_db_password' => 'mot-de-passe-mysql',
-... ]);
+php artisan depot:tenant:create chez-paul --name="Dépôt Chez Paul" --db=compte_chezpaul --db-user=compte_paul
+# le code d'entreprise (chez-paul) est la valeur de l'en-tête X-Tenant ; le mot de passe MySQL est demandé au clavier
 ```
 
 3. **Préparer le dépôt** (vérifie la connexion, migre, crée le gérant) :
@@ -82,7 +76,8 @@ php artisan tinker
 ```bash
 php artisan depot:provision chez-paul --email=paul@exemple.com --name="Paul"
 # Le mot de passe initial du gérant est affiché une seule fois.
-php artisan depot:demo chez-paul      # (optionnel) 3 produits de démonstration
+php artisan depot:demo chez-paul --full --users   # (optionnel, dépôt de TEST) produits, casiers, clients, fournisseurs, comptes de test
+# Déroulé de test complet : SCENARIO-DE-TEST.md
 ```
 
 4. **Se connecter** :
