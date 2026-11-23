@@ -107,6 +107,7 @@ Route::middleware(EnsureRole::class.':gerant')->prefix('reports')->group(functio
 });
 
 Route::middleware(EnsureRole::class.':gerant,magasinier')->get('reports/stock-alerts', [ReportController::class, 'stockAlerts']);
+Route::middleware(EnsureRole::class.':gerant,magasinier')->get('reports/stock-summary', [ReportController::class, 'stockSummary']);
 
 // Inventaire physique : le magasinier compte, le gérant valide
 Route::middleware(EnsureRole::class.':gerant,magasinier')->group(function () {

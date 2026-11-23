@@ -13,6 +13,7 @@ use App\Models\Payment;
 use App\Models\Product;
 use App\Models\Purchase;
 use App\Models\Sale;
+use App\Models\StockMovement;
 use App\Models\Supplier;
 use App\Models\SupplierPayment;
 use Illuminate\Support\Carbon;
@@ -253,6 +254,51 @@ class ReportService
             ])->values();
 
         return ['count' => $products->count(), 'products' => $products->all()];
+    }
+
+    /**
+     * Bilan de stock par produit sur la période (remplace le calcul fait à la main) :
+     * ouverture + entrées - ventes - casse ± corrections ± annulations = clôture.
+     * Tout est en BOUTEILLES. La clôture se déduit du stock actuel moins les mouvements
+     * postérieurs à la période ; l'ouverture = clôture - mouvements de la période.
+     */
+    public function stockSummary(array $p): array
+    {
+        $range = [$p['start'], $p['end']];
+
+        $inPeriod = StockMovement::whereBetween('created_at', $range)
+            ->selectRaw('product_id, type, SUM(quantity) as qty')
+            ->groupBy('product_id', 'type')
+            ->get()
+            ->groupBy('product_id');
+
+        $after = StockMovement::where('created_at', '>', $p['end'])
+            ->selectRaw('product_id, SUM(quantity) as qty')
+            ->groupBy('product_id')
+            ->pluck('qty', 'product_id');
+
+        $products = Product::where('active', true)->orderBy('name')->get()->map(function (Product $prod) use ($inPeriod, $after) {
+            $by = ($inPeriod[$prod->id] ?? collect())->mapWithKeys(fn ($r) => [$r->type => (int) $r->qty]);
+            $closing = (int) $prod->stock_bottles - (int) ($after[$prod->id] ?? 0);
+
+            return [
+                'id'                => $prod->id,
+                'name'              => $prod->name,
+                'bottles_per_crate' => (int) $prod->bottles_per_crate,
+                'opening'           => $closing - (int) $by->sum(),
+                'entries'           => (int) ($by['entree'] ?? 0),
+                'sales'             => -(int) ($by['sortie'] ?? 0),
+                'breakage'          => -(int) ($by['casse'] ?? 0),
+                'corrections'       => (int) ($by['ajustement'] ?? 0) + (int) ($by['inventaire'] ?? 0),
+                'voids'             => (int) ($by['annulation'] ?? 0),
+                'closing'           => $closing,
+            ];
+        })->values();
+
+        return [
+            'period'   => ['from' => $p['from'], 'to' => $p['to'], 'timezone' => $p['timezone'], 'days' => $p['days']],
+            'products' => $products->all(),
+        ];
     }
 
     /** Caisses clôturées sur la période, avec écarts, et bilan par vendeur (pour repérer les écarts répétés). */

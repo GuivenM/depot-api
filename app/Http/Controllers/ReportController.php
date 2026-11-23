@@ -38,6 +38,11 @@ class ReportController extends Controller
         return $this->reports->stockAlerts();
     }
 
+    public function stockSummary(Request $request)
+    {
+        return $this->reports->stockSummary($this->period($request, 92));
+    }
+
     /** Dates en YYYY-MM-DD (heure du dépôt) ; par défaut : aujourd'hui. */
     private function period(Request $request, int $maxDays = 366): array
     {
